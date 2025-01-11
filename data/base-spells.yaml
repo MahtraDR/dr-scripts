@@ -1621,6 +1621,7 @@ spell_data:
     mana_type: lunar
     prep: target
     guild: Moon Mage
+    any_celestial_object: true
   Cage of Light:
     skill: Warding
     abbrev: CoL
@@ -1662,6 +1663,7 @@ spell_data:
     mana_type: lunar
     prep: prepare
     guild: Moon Mage
+    bright_celestial_object: true
   Destiny Cipher:
     skill: Utility
     abbrev: DC

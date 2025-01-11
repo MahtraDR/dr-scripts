@@ -802,8 +802,10 @@ Rossman's Landing:
   # safe room: 7695
   tannery:
     id: 7702
-    name:
+    name: Drinak
   currency: lirums
+  vault:
+    id: 51487
   exchange:
     id: 12418
     fee: 0.09
@@ -811,6 +813,7 @@ Rossman's Landing:
     id: 12417
   gemshop:
     id: 12416
+    name: Barberry
   leather_repair:
     id: 8737
     name: Unspiek

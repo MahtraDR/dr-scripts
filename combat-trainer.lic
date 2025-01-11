@@ -1098,7 +1098,7 @@ class SafetyProcess
   def execute(game_state)
     if @untendable_counter >= 3 && @stop_on_bleeding
       echo('Skipping tendme check due to untendable backoff') if $debug_mode_ct
-      echo("Couldn't tend bleeders after trying three times. Stopping hunt to heal.")
+      echo("Couldn't tend bleeders after trying three times. Stopping hunt. Get healed!")
       $HUNTING_BUDDY.stop_hunting
       $COMBAT_TRAINER.stop
     elsif bleeding? && !Script.running?('tendme')

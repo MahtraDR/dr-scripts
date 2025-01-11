@@ -1,0 +1,119 @@
+custom_require.call(%w[common common-items common-travel])
+
+class LearnFOU
+  def initialize
+    arg_definitions = [
+      [
+        { name: 'crevasse', options: 'crevasse', optional: true, description: 'Skip the cone and start with the lava crevasse' }
+      ]
+    ]
+
+    args = parse_args(arg_definitions)
+    check_blood
+    study_cone() unless args.crevasse
+    study_crevasse()
+  end
+
+  def check_blood
+    mobar_blood = [Lich::Util.issue_command('inv search mobar blood', /^You rummage about your person/, /^Roundtime:|^You can't seem to find anything/, include_end: false, timeout: 15, usexml: false).count - 2, 0].max
+    if mobar_blood >= 5
+      return
+    elsif mobar_blood >= 1
+      DRC.message("You can can try to learn FOU, but you might run out of mobar blood unless you're lucky.")
+      pause 5
+      DRC.message("If you are sure you wish to proceed, simply let the script continue, otherwise kill the script, and get more blood.")
+      pause 15
+      return
+    elsif mobar_blood < 1
+      DRC.message("No mobar blood - need to have at least one, but recomended at *least* 5.")
+      exit
+    end
+  end
+
+  def study_cone
+    DRCT.walk_to(13641)
+    fput('study cone')
+  end
+
+  def study_crevasse
+    # Get to the fangs of ushnish area
+    unless XMLData.room_title.include?('The Fangs of Ushnish')
+      DRCT.walk_to(13643)
+      move('climb cliff')
+    end
+
+    # check for blood before wandering
+    if !DRCI.get_item('mobar blood', nil)
+      DRC.message("Ran out of Mobar Blood!  Headding to your saferoom!")
+      DRC.wait_for_script_to_complete('bescort', ['gate_of_souls', 'exit'])
+      DRC.wait_for_script_to_complete('gosafe')
+      exit
+    end
+
+    # setup flags for managing state
+    Flags.add('viper-present', 'Very slowly, a .* viper rises out of the crevasse')
+    Flags.add('crevasse-closed', 'A rolling quake brings the edges of the crevasse together, sealing')
+
+    study_count = 0
+    loop do
+      # reset the flags each loop
+      Flags.reset('viper-present')
+      Flags.reset('crevasse-closed')
+
+      # find the crevasse
+      DRC.wait_for_script_to_complete('bescort', ['gate_of_souls', 'fou'])
+
+      # put the blood in the crevasse
+      DRC.bput('put my blood in crevasse', 'Holding out your hand high above the boiling surface')
+
+      # retreat while not a safe room (magma viper not present)
+      until Flags['viper-present']
+        fput('retreat')
+        pause 1
+      end
+
+      study_count += 1
+      # study the crevasse, break out of loop if you are successful
+      break if "The image of a red-hot cone momentarily sears your mind's eye" == DRC.bput('study crevasse', "The image of a red-hot cone momentarily sears your mind's eye", 'You think you see some meaning within the flow of lava')
+
+      # if not successful get new blood (so you don't wait if you're out)
+      if !DRCI.get_item('mobar blood', nil)
+        DRC.message("Ran out of Mobar Blood!  Headding to your saferoom!")
+        DRC.wait_for_script_to_complete('bescort', ['gate_of_souls', 'exit'])
+        DRC.wait_for_script_to_complete('gosafe')
+        exit
+      end
+
+      echo "waiting for crevasse to close, this can take a while."
+      # wait for the crevasse to close
+      until Flags['crevasse-closed']
+        pause 5
+      end
+    end
+
+    echo "Succesful after using #{study_count} mobar blood/studies"
+
+    # leave the fangs of ushnish area, headed for the temple
+    DRC.wait_for_script_to_complete('bescort', ['gate_of_souls', 'temple'])
+
+    # get to the cone and learn the spell
+    DRCT.walk_to(13641)
+    echo "This part has long RT.  Good luck!"
+    fput('kneel')
+    fput('pray ushnish')
+    waitfor('The Fire of Ushnish spell pattern becomes consummated in your head')
+    waitrt?
+    DRC.fix_standing
+
+    # go home!
+    DRC.wait_for_script_to_complete('bescort', ['gate_of_souls', 'exit'])
+    DRC.wait_for_script_to_complete('gosafe')
+  end
+end
+
+before_dying do
+  Flags.delete('viper-present')
+  Flags.delete('crevasse-closed')
+end
+
+LearnFOU.new

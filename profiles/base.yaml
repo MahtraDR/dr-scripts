@@ -29,8 +29,8 @@ t2_avoids:
   - type: drag
     state: true
 
-# scripts to rune before the starup of T2
-t2_before_starup:
+# Scripts to run before starting T2
+t2_before_startup:
 #  - multi 1, move door
 #  - gosafe
 # Scripts to run after *controlled* shutdown of T2
@@ -2595,27 +2595,24 @@ skill_recorder_check_exp_mods: false
 # for your dead body to be resurrected so that we can run `info` again.
 drinfomon_passive_delay: 30
 
-# For Dragonrealms on Lich5 only
-# A change in behavior from Lich4 to Lich5 caused certain ;go2 map wayto movements to fail.
-# This is because of the way the map stringprocs are structured, and the method used to evaluate
-# certain map moves, which involved an arguably dubious overloading of FalseClass on Lich4.
-# The transition to Lich5 makes it necessary to fix some stringprocs as an interim solution, at
-# least until the map can be divested from current control and handled appropriately. This section
-# FIXES via stringproc known map movement failures as a result of the transition to Lich5. A user
-# with the appropriate skill can overload these in their own yaml(s).
+# Context: In the past, approval of map StringProc changes could take a long time, so it was
+# frowned upon to get the map locked.
+# Allows for overriding map settings for the go2 script. Do not use this setting in your own yaml
+# Use personal_wayto_overrides instead.
+# These are commented out for historical reference only. These are in the map now.
 base_wayto_overrides:
-  asketis_mount_up:
-    start_room: 27558
-    end_room: 31491
-    str_proc: start_script('bescort', ['asketis_mount', 'up']);wait_while{running?('bescort')};
-  asketis_mount_down:
-    start_room: 27558
-    end_room: 27556
-    str_proc: start_script('bescort', ['asketis_mount', 'down']);wait_while{running?('bescort')};
-  into_the_abyss:
-    start_room: 13600
-    end_room: 13603
-    str_proc: start_script('bescort', ['coffin']); wait_while{running?('bescort')};
+  # asketis_mount_up:
+  #   start_room: 27558
+  #   end_room: 31491
+  #   str_proc: start_script('bescort', ['asketis_mount', 'up']);wait_while{running?('bescort')};
+  # asketis_mount_down:
+  #   start_room: 27558
+  #   end_room: 27556
+  #   str_proc: start_script('bescort', ['asketis_mount', 'down']);wait_while{running?('bescort')};
+  # into_the_abyss:
+  #   start_room: 13600
+  #   end_room: 13603
+  #   str_proc: start_script('bescort', ['coffin']); wait_while{running?('bescort')};
 
 # Setting for taskmaster - Lists item to be kept by the script.
 task_keep_list:

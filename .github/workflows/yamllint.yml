@@ -2,6 +2,8 @@ name: Valid YAML syntax
 
 on: 
   push:
+    branches: 
+      - 'main'
     paths:
       - "data/*.yaml"
       - "profiles/**.yaml"

@@ -19,16 +19,23 @@ class ScrollSorter
     @stacker_container = @settings.scroll_sorter['stacker_container']
     @custom_nouns = @settings.scroll_sorter['scroll_nouns']
     @scroll_nouns = get_data('items').scroll_nouns + @custom_nouns
+    @unleash_mana = @settings.scroll_sorter['unleash_mana']
+    @unleash_harnesses = @settings.scroll_sorter['unleash_harnesses']
+    @unleash_harnesses ||= 1
 
     arg_definitions =
       [
         [
-          { name: 'container', regex: /\w+/, optional: true, description: 'The container to collect scrolls from' }
+          { name: 'container', regex: /\w+/, optional: true, description: 'The container to collect scrolls from.' }
         ],
 
         [
-          { name: 'find', regex: /find/i, description: 'Find the specified spell scroll in your stackers' },
-          { name: 'spell', regex: /\w+/i, optional: false, description: 'Name of spell to find.  Use full name, enclose in double quotes if more than one word' }
+          { name: 'find', regex: /find/i, description: 'Find the specified spell scroll in your stackers.' },
+          { name: 'spell', regex: /\w+/i, optional: false, description: 'Name of spell to find.  Use full name, enclose in double quotes if more than one word.' }
+        ],
+        [
+          { name: 'unleash', regex: /unleash/i, description: 'Unleash the specified spell scroll in your stackers.' },
+          { name: 'spell', regex: /\w+/i, optional: false, description: 'Name of spell to unleash.  Use full name, enclose in double quotes if more than one word.' }
         ]
       ]
 
@@ -38,6 +45,9 @@ class ScrollSorter
 
     if args.find
       find_spell(args.spell)
+    elsif args.unleash
+      find_spell(args.spell)
+      unleash_spell
     else
       sort_scrolls
     end
@@ -80,6 +90,10 @@ class ScrollSorter
 
   def find_abbrev(spell)
     return @all_spells.select { |s, _g| s.casecmp(spell) == 0 }.flatten[2]
+  end
+
+  def find_full_spell_name(abbrev)
+    return @all_spells.select { |_s, _g, a| a.casecmp(abbrev) == 0 }.flatten[0]
   end
 
   def check_scroll(scroll)
@@ -141,6 +155,10 @@ class ScrollSorter
   def find_spell(name, guild = nil)
     if guild.nil?
       guild = find_guild(name)
+      if guild.nil?
+        name = find_full_spell_name(name)
+        guild = find_guild(name)
+      end
       unknown(guild) if guild.nil? || guild == 'Analogous'
     end
     ord = find_case(guild)
@@ -171,7 +189,30 @@ class ScrollSorter
       end
       DRC.bput("pull my #{@stacker}", /This was the last copy/, /Carefully, you remove a copy/)
     end
-    DRC.bput("put my #{@stacker} in my #{@stacker_container}", /You put your/)
+    stow_and_refactor_cases(guild)
+  end
+
+  def unleash_spell
+    DRC.wait_for_script_to_complete('buff', ['unleash'])
+    if DRCA.spell_preparing?
+      /You are preparing.*spell at (.*) mana/ =~ DRC.bput('per', /You are preparing.*spell at (.*) mana/)
+      mana = DRC.text2num(Regexp.last_match(1).to_s)
+      harn = calculate_harness_array((@unleash_mana - mana), @unleash_harnesses)
+      pause 1 until DRCA.spell_prepared?
+      DRCA.harness_mana(harn)
+      DRCA.cast?
+    else
+      DRC.message('Unleash failed!')
+    end
+    stack_scroll('scroll', check_scroll('scroll'))
+  end
+
+  def calculate_harness_array(number, n)
+    base_part = number / n
+    remainder = number % n
+    parts = Array.new(n, base_part)
+    remainder.times { |i| parts[i] += 1 }
+    parts
   end
 end
 

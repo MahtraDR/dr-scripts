@@ -106,7 +106,7 @@ class Sew
       DRCC.find_recipe2(@chapter, @recipe_name, @settings.master_crafting_book, 'tailoring')
     else
       DRCC.get_crafting_item('tailoring book', @bag, @bag_items, @belt)
-      echo('*** You will need to upgrade to a journeyman or master book before 176 ranks! ***') if DRSkill.getrank('Engineering') == 175
+      echo('*** You will need to upgrade to a journeyman or master book before 176 ranks! ***') if DRSkill.getrank('Outfitting') == 175
       DRCC.find_recipe2(@chapter, @recipe_name)
       DRCC.stow_crafting_item('tailoring book', @bag, @belt)
     end

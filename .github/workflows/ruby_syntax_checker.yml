@@ -2,6 +2,8 @@ name: Valid Ruby syntax
 
 on:
   push:
+    branches: 
+      - 'main'
     paths:
       - "*.lic"
       - "*.rb"
