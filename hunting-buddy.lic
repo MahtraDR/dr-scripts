@@ -95,6 +95,9 @@ class HuntingBuddy
     @prehunt_buff_waggle = @settings.prehunt_buff_waggle || 'prehunt_buffs'
     echo("  @prehunt_buff_waggle: #{@prehunt_buff_waggle}") if $debug_mode_hunting
 
+    @disable_room_descriptions = @settings.hunting_disable_room_descriptions
+    echo("  @disable_room_descriptions: #{@disable_room_descriptions}") if $debug_mode_hunting
+
     # After checking all hunting files to use, this array
     # will be the combined set of hunting infos to execute.
     @hunting_info = []
@@ -557,6 +560,8 @@ class HuntingBuddy
     Flags.add('hunting-buddy-stop-to-burgle', /^A tingling on the back of your neck draws attention to itself by disappearing, making you believe the heat is off from your last break in/)
     DRC.message("***STATUS*** Beginning hunt '#{args}' for '#{duration}' minutes")
 
+    fput('flag description off') if @disable_room_descriptions
+
     verify_script('combat-trainer')
     start_script('combat-trainer', args)
 
@@ -633,6 +638,7 @@ class HuntingBuddy
         DRC.message("***STATUS*** Heading back to room because familiar drug while stunned")
         pause_script('combat-trainer') if Script.running?('combat-trainer')
         DRCT.walk_to(hunting_room)
+        fput('flag description off') if @disable_room_descriptions
         unpause_script('combat-trainer') if Script.running?('combat-trainer')
         Flags.reset('hunting-buddy-familiar-drag')
       end
@@ -667,6 +673,7 @@ class HuntingBuddy
 
     $COMBAT_TRAINER.stop
     pause 1 while $COMBAT_TRAINER.running || Script.running?('combat-trainer')
+    fput('flag description on') if @disable_room_descriptions
     DRC.retreat
   end
 
@@ -696,6 +703,7 @@ class HuntingBuddy
 end
 
 before_dying do
+  fput('flag description on') if $HUNTING_BUDDY&.instance_variable_get(:@disable_room_descriptions)
   ['combat-trainer'].each do |script_name|
     stop_script(script_name) if Script.running?(script_name)
   end
