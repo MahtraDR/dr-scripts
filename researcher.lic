@@ -8,7 +8,7 @@ Summary -- Researches a single topic. Type ';researcher help' for usage and opti
 
 =end
 
-VALID_RESEARCH_TOPICS = ['fundamental', 'stream', 'augmentation', 'utility', 'warding'].freeze
+VALID_RESEARCH_TOPICS = %w[fundamental stream augmentation utility warding sorcery energy field spell plane planes road wild].freeze
 
 class Researcher
   def initialize
@@ -63,12 +63,20 @@ class Researcher
     DRC.message("  ;researcher help                 - Display this help")
     DRC.message("  ;researcher                      - Use topic from YAML settings")
     DRC.message("")
-    DRC.message("Valid Research Topics (provide experience):")
+    DRC.message("Valid Research Topics:")
     DRC.message("  fundamental   - Magic/Arcana experience")
     DRC.message("  stream        - Attunement experience (or use 'attunement')")
     DRC.message("  augmentation  - Augmentation experience")
     DRC.message("  utility       - Utility experience")
     DRC.message("  warding       - Warding experience")
+    DRC.message("  sorcery       - Sorcerous research (backlash risk)")
+    DRC.message("  energy        - High energy spellcasting (backlash risk)")
+    DRC.message("  field         - Mana field theory (backlash risk)")
+    DRC.message("  spell         - Spell research (backlash risk)")
+    DRC.message("  plane         - Plane of probability (quest required)")
+    DRC.message("  planes        - Elemental planes (quest required)")
+    DRC.message("  road          - Starry road (quest required)")
+    DRC.message("  wild          - Wild magic (backlash risk, event-only)")
     DRC.message("")
     DRC.message("Valid Symbiosis Types:")
     DRC.message("  activate, avoid, cast, discern, endure, examine, explore,")
@@ -83,9 +91,9 @@ class Researcher
   end
 
   def validate_research_topic
-    return if @current_topic&.start_with?('symbiosis')
-
     @current_topic = @current_topic&.downcase
+    return if @current_topic&.match?(/^symbiosis \S+$/)
+
     @current_topic = 'stream' if @current_topic == 'attunement'
 
     unless @current_topic && VALID_RESEARCH_TOPICS.include?(@current_topic)
@@ -111,7 +119,7 @@ class Researcher
   end
 
   def add_flags
-    Flags.add('research-partial', 'there is still more to learn before you arrive at a breakthrough', 'distracted by combat', 'distracted by your spellcasting', 'You lose your focus on your research project', 'you forget what you were') unless Flags['research-partial']
+    Flags.add('research-partial', 'there is still more to learn before', 'distracted by combat', 'distracted by your spellcasting', 'You lose your focus on your research project', 'you forget what you were') unless Flags['research-partial']
     Flags.add('research-complete', '^Breakthrough!', 'You complete reviewing your knowledge of the \w+ symbiosis and commit the details to memory') unless Flags['research-complete']
   end
 
@@ -142,12 +150,12 @@ class Researcher
     return if researching
 
     check_gaf
-    case DRC.bput("research #{@current_topic} 300", 'You focus', 'You tentatively', 'You confidently', 'Abandoning the normal', 'You cannot begin', 'You are already busy', 'Usage:', "You do not know how to research", 'You start to research')
+    case DRC.bput("research #{@current_topic} 300", 'You expertly coach', 'You focus', 'You tentatively', 'You confidently', 'Abandoning the normal', 'You cannot begin', 'You are already busy', 'Usage:', "You do not know how to research", 'You start to research', 'You begin to bend', 'With a mixture of rational concern')
     when 'You cannot begin'
       fput('research cancel')
       fput('research cancel')
       start_research
-    when 'You focus', 'You tentatively', 'You confidently', 'Abandoning the normal', 'You are already busy', 'You start to research'
+    when 'You focus', 'You tentatively', 'You confidently', 'Abandoning the normal', 'You are already busy', 'You start to research', 'You expertly coach', 'You begin to bend', 'With a mixture of rational concern'
       set_researching(true)
     when 'Usage:', 'You do not know how to research'
       echo "Invalid research option"
@@ -179,7 +187,7 @@ class Researcher
         { name: 'debug', regex: /^debug$/i, optional: true, description: 'Enable debug output' }
       ],
       [
-        { name: 'skill', options: %w[attunement augmentation fundamental stream utility warding], description: 'What skill or type of research do you want to do?' }
+        { name: 'skill', options: %w[attunement augmentation fundamental stream utility warding sorcery energy field spell plane planes road wild], description: 'What skill or type of research do you want to do?' }
       ],
       [
         { name: 'symbiosis', regex: /symbiosis/i, description: "Do symbiosis research?" },

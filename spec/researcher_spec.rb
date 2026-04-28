@@ -165,16 +165,16 @@ RSpec.describe Researcher do
 
     it 'exits on invalid topic' do
       allow(DRC).to receive(:message)
-      researcher.instance_variable_set(:@current_topic, 'sorcery')
+      researcher.instance_variable_set(:@current_topic, 'alchemy')
       researcher.send(:validate_research_topic)
       expect(researcher).to have_received(:exit)
     end
 
     it 'displays error messages for invalid topic' do
       allow(DRC).to receive(:message)
-      researcher.instance_variable_set(:@current_topic, 'sorcery')
+      researcher.instance_variable_set(:@current_topic, 'alchemy')
       researcher.send(:validate_research_topic)
-      expect(DRC).to have_received(:message).with(/Invalid research topic: sorcery/)
+      expect(DRC).to have_received(:message).with(/Invalid research topic: alchemy/)
       expect(DRC).to have_received(:message).with(/Valid topics are:/)
     end
 
@@ -206,17 +206,18 @@ RSpec.describe Researcher do
       expect(researcher).to have_received(:exit)
     end
 
-    it "does not treat 'Symbiosis' (capitalized, no type) as a symbiosis topic" do
+    it "rejects bare 'Symbiosis' with no type" do
       allow(DRC).to receive(:message)
       researcher.instance_variable_set(:@current_topic, 'Symbiosis')
       researcher.send(:validate_research_topic)
-      # downcase makes it 'symbiosis', which starts_with?('symbiosis') is checked
-      # BEFORE downcase, so capitalized 'Symbiosis' would NOT match the start_with
-      # check (which uses &.start_with? on the original value). Wait -- start_with?
-      # is called before downcase. 'Symbiosis'.start_with?('symbiosis') is false
-      # in Ruby (case-sensitive). So it falls through to downcase -> 'symbiosis'
-      # -> not in VALID_RESEARCH_TOPICS -> exit.
       expect(researcher).to have_received(:exit)
+    end
+
+    it "accepts 'Symbiosis activate' (capitalized) after downcasing" do
+      researcher.instance_variable_set(:@current_topic, 'Symbiosis activate')
+      researcher.send(:validate_research_topic)
+      expect(researcher.instance_variable_get(:@current_topic)).to eq('symbiosis activate')
+      expect(researcher).not_to have_received(:exit)
     end
   end
 
@@ -488,13 +489,14 @@ RSpec.describe Researcher do
         researcher.send(:start_research)
         expect(DRC).to have_received(:bput).with(
           'research augmentation 300',
-          'You focus', 'You tentatively', 'You confidently',
+          'You expertly coach', 'You focus', 'You tentatively', 'You confidently',
           'Abandoning the normal', 'You cannot begin', 'You are already busy',
-          'Usage:', 'You do not know how to research', 'You start to research'
+          'Usage:', 'You do not know how to research', 'You start to research',
+          'You begin to bend', 'With a mixture of rational concern'
         )
       end
 
-      %w[You\ focus You\ tentatively You\ confidently Abandoning\ the\ normal You\ are\ already\ busy You\ start\ to\ research].each do |response|
+      ['You focus', 'You tentatively', 'You confidently', 'Abandoning the normal', 'You are already busy', 'You start to research', 'You expertly coach', 'You begin to bend', 'With a mixture of rational concern'].each do |response|
         it "sets researching true on '#{response}'" do
           allow(DRC).to receive(:bput).and_return(response)
           researcher.send(:start_research)
@@ -755,8 +757,11 @@ RSpec.describe Researcher do
       expect(VALID_RESEARCH_TOPICS).to be_frozen
     end
 
-    it 'contains exactly the five expected topics' do
-      expect(VALID_RESEARCH_TOPICS).to contain_exactly('fundamental', 'stream', 'augmentation', 'utility', 'warding')
+    it 'contains all valid research topics' do
+      expect(VALID_RESEARCH_TOPICS).to contain_exactly(
+        'fundamental', 'stream', 'augmentation', 'utility', 'warding',
+        'sorcery', 'energy', 'field', 'spell', 'plane', 'planes', 'road', 'wild'
+      )
     end
 
     it 'does not include attunement (handled by normalization)' do
