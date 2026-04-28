@@ -85,15 +85,12 @@ end unless defined?(UserVars)
 load_lic_constant('researcher.lic', 'VALID_RESEARCH_TOPICS')
 load_lic_class('researcher.lic', 'Researcher')
 
-RSpec.configure do |config|
-  config.before(:each) do
+RSpec.describe Researcher do
+  before(:each) do
     reset_data
     UserVars._reset
     UserVars.researcher = {}
   end
-end
-
-RSpec.describe Researcher do
   let(:researcher) { Researcher.allocate }
   let(:settings) { {} }
 
