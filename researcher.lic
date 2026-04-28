@@ -11,9 +11,9 @@ Notes
 * Symbiosis research is also supported (e.g. ';researcher symbiosis activate')
 
 YAML Configuration Example:
-research:
-  topic: augmentation  # Valid: fundamental, stream, augmentation, utility, warding
-  debug: false         # Optional: enable debug output
+  research:
+    topic: augmentation  # Valid: fundamental, stream, augmentation, utility, warding
+    debug: false         # Optional: enable debug output
 
 Usage:
   ;researcher <topic>              # Research a specific magic skill
