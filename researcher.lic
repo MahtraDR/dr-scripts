@@ -17,7 +17,7 @@ class Researcher
     display_help_and_exit if args.help
 
     begin
-      @settings = Lich::DragonRealms::SetupFiles.instance.get_settings
+      @settings = get_settings
     rescue StandardError => e
       DRC.message("Error loading settings: #{e.message}")
       DRC.message("Make sure you have your YAML configuration files set up properly.")
@@ -186,7 +186,7 @@ class Researcher
         { name: 'sym_type', options: %w[activate avoid cast discern endure examine explore harness harvest heal impress learn perform remember resolve spell spring strengthen watch], description: "Which symbiosis do you want to research?" }
       ]
     ]
-    Lich::DragonRealms::ArgParser.parse_args(arg_definitions)
+    Lich::Common::ArgParser.new.parse_args(arg_definitions)
   end
 end
 

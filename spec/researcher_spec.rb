@@ -46,6 +46,20 @@ module DRC
   end
 end unless defined?(DRC)
 
+module Lich
+  module Common
+    class ArgParser
+      def parse_args(*_args)
+        OpenStruct.new
+      end
+    end
+  end
+end unless defined?(Lich::Common::ArgParser)
+
+def get_settings(*)
+  {}
+end unless defined?(get_settings)
+
 module DRCA
   class << self
     def cast_spell(*_args); end
