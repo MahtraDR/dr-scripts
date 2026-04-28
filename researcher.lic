@@ -4,26 +4,7 @@ refactored by: EO/dr-scripts
 game: dr
 version: 1.0.0
 
-Notes
-* Type ';researcher help' to see available research options
-* You can define a waggle set called 'gaf' with only gauge flow in it if you want to override the min prep gaf casting
-* Valid research topics: fundamental, stream, augmentation, utility, warding
-* Symbiosis research is also supported (e.g. ';researcher symbiosis activate')
-
-YAML Configuration Example:
-  research:
-    topic: augmentation  # Valid: fundamental, stream, augmentation, utility, warding
-    debug: false         # Optional: enable debug output
-
-Usage:
-  ;researcher <topic>              # Research a specific magic skill
-  ;researcher symbiosis <type>     # Research a symbiosis type
-  ;researcher help                 # Display help and valid options
-  ;researcher                      # Use topic from YAML settings
-
-Summary
-Does research on a single subject. Specify the subject as an argument (e.g. ';researcher augmentation'),
-use symbiosis research (e.g. ';researcher symbiosis activate'), or configure in YAML settings.
+Summary -- Researches a single topic. Type ';researcher help' for usage and options.
 
 =end
 
