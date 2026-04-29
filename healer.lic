@@ -101,13 +101,6 @@ class Healer
   ARRIVAL_PATTERN = /^(?:.+ )?(?<character>\w+) just arrived\.$/i.freeze
 
   # Patterns for teaching responses
-  TEACH_RESPONSES = [
-    'You begin to', 'is already listening to you', 'is listening to someone else',
-    'I could not find', 'You have already offered', 'That person is too busy',
-    'You are already teaching', 'You cannot teach two different classes',
-    'is not paying attention', 'You cannot listen to a teacher and teach',
-    'already trying to teach', 'trying to teach someone else'
-  ].freeze
 
   # Patterns for link responses
   LINK_SUCCESS_PATTERN = /Stretching your senses/.freeze
@@ -159,6 +152,7 @@ class Healer
     @last_health_check = nil
     @last_ready_result = false
     @emergency_recovery = false
+    @drain_landed = false
     @healing_waggle_set = @settings.healer_waggle_set || 'healme'
     @cambrinth_item = Array(@settings.cambrinth).first
 
@@ -651,9 +645,12 @@ class Healer
     DownstreamHook.add(@hook_id, proc { |line|
       begin
         clean = line.gsub(/<[^>]*>/, '').strip
-        queue_from_line(clean) unless clean.empty?
-      rescue StandardError
-        # Never let hook errors crash the game client
+        unless clean.empty?
+          @drain_landed = true if clean.include?('You feel your vitality transferring')
+          queue_from_line(clean)
+        end
+      rescue StandardError => e
+        log("Hook error in #{@hook_id}: #{e.message}") if debug?
       end
       line # Pass through unchanged
     })
@@ -908,9 +905,10 @@ class Healer
 
     # Final self-heal to ensure we're clean before resuming other patients
     heal_self
+    DRC.bput("whisper #{victim} You're dead -- get a cleric!", *WHISPER_RESPONSES)
     Lich::Messaging.msg("bold", "Healer: Dead patient #{victim} wounds cleared, resuming normal operation")
     DRC.log_window("Healer: Dead #{victim} wounds cleared", "familiar")
-    update_patient(victim, touched: true, timer: Time.now)
+    remove_patient(victim, reason: :dead_healed)
   end
 
   # Transfers wounds from a patient.
@@ -1053,7 +1051,7 @@ class Healer
   # State machine for vitality healing via VH spell.
   # Prep-first approach: preps VH before transferring so it can cast immediately
   # when damage lands. Single transfer per round to prevent runaway drain.
-  # Phases: :start -> :prepping -> :transfer_and_cast -> :recovering (loops)
+  # Phases: :start -> :prepping -> :awaiting_drain -> :recovering (loops)
   # @return [void]
   def process_vitality_slot
     task = @spell_task
@@ -1091,31 +1089,25 @@ class Healer
         return
       end
 
-      # Single vit transfer, then block-wait for the actual drain to land
-      # before casting VH. The drain line ("You feel your vitality transferring")
-      # typically fires ~3s after the transfer command.
+      # Send vit transfer and wait for the drain to land via DownstreamHook.
+      # Non-blocking: returns immediately so wound/disease healing can continue.
+      @drain_landed = false
       fput("transfer #{task[:patient]} vit quick")
       log("Transferred vitality from #{task[:patient]}, waiting for drain to land")
       DRC.log_window("Healer: Transferring vitality from #{task[:patient]}", "familiar")
-
-      drain_landed = false
-      start = Time.now
-      while Time.now - start < 8
-        line = get?
-        if line&.include?('You feel your vitality transferring')
-          drain_landed = true
-          break
-        end
-        pause 0.1 unless line
-      end
-
-      # Cast VH immediately -- either drain landed or timeout (cast anyway as safety net)
-      waitrt?
-      waitcastrt?
-      fput('cast')
-      log("Cast VH (drain_landed=#{drain_landed}), health now #{DRStats.health}%")
-      @spell_task[:phase] = :recovering
+      @spell_task[:phase] = :awaiting_drain
+      @spell_task[:drain_sent_at] = Time.now
       @spell_task[:timer] = Time.now
+
+    when :awaiting_drain
+      if @drain_landed || Time.now - (task[:drain_sent_at] || Time.now) > 8
+        waitrt?
+        waitcastrt?
+        fput('cast')
+        log("Cast VH (drain_landed=#{@drain_landed}), health now #{DRStats.health}%")
+        @spell_task[:phase] = :recovering
+        @spell_task[:timer] = Time.now
+      end
 
     when :recovering
       if DRStats.health >= 90

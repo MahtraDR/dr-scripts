@@ -342,35 +342,41 @@ RSpec.describe Healer do
   # ============================================================
 
   describe 'dead patient detection' do
-    it 'removes a dead patient and whispers to get a cleric' do
+    it 'heals a dead patient fully then whispers to get a cleric' do
       healer = build_healer(friends: ['Tenuk'])
       healer.add_patient('Tenuk')
       DRRoom.pcs = ['Tenuk']
 
-      dead_health = health_result(
+      dead_with_wounds = health_result(
         dead: true,
         score: 9,
         wounds: { 'RIGHT LEG' => [wound(body_part: 'RIGHT LEG', severity: 2)] }
       )
-      allow(DRCH).to receive(:perceive_health_other).with('Tenuk').and_return(dead_health)
+      dead_clear = health_result(dead: true, score: 0)
 
-      expect(DRC).to receive(:bput).with("whisper Tenuk You're dead -- get a cleric!", anything, anything, anything)
+      # First perceive in heal_patient detects dead; re-perceive in loop sees
+      # wounds, then wounds cleared on the next iteration.
+      allow(DRCH).to receive(:perceive_health_other)
+        .with('Tenuk')
+        .and_return(dead_with_wounds, dead_with_wounds, dead_clear)
+
+      expect(DRC).to receive(:bput)
+        .with("whisper Tenuk You're dead -- get a cleric!", anything, anything, anything)
 
       healer.send(:heal_patient, healer.get_patient('Tenuk'))
 
       expect(healer.patients).to be_empty
     end
 
-    it 'does not transfer wounds from a dead patient' do
+    it 'does not use Unity link for dead patients' do
       healer = build_healer(friends: ['Tenuk'])
       healer.add_patient('Tenuk')
       DRRoom.pcs = ['Tenuk']
 
-      dead_health = health_result(dead: true, score: 15)
-      allow(DRCH).to receive(:perceive_health_other).with('Tenuk').and_return(dead_health)
+      dead_clear = health_result(dead: true, score: 0)
+      allow(DRCH).to receive(:perceive_health_other).with('Tenuk').and_return(dead_clear)
 
-      expect(DRC).not_to receive(:bput).with(/redirect/, anything, anything)
-      expect(DRC).not_to receive(:bput).with(/transfer.*quick all/, anything, anything)
+      expect(DRC).not_to receive(:bput).with(/link.*unity/, anything, anything)
 
       healer.send(:heal_patient, healer.get_patient('Tenuk'))
     end
@@ -442,14 +448,14 @@ RSpec.describe Healer do
 
     shared_examples 'queues a friend' do |description, line, expected_name|
       it "queues #{expected_name} from #{description}" do
-        healer.send(:process_line, line)
+        healer.send(:queue_from_line, line)
         expect(healer.patients).to have_key(expected_name.downcase.to_sym)
       end
     end
 
     shared_examples 'ignores a non-friend' do |description, line|
       it "ignores non-friend from #{description}" do
-        healer.send(:process_line, line)
+        healer.send(:queue_from_line, line)
         expect(healer.patients).to be_empty
       end
     end
@@ -518,38 +524,6 @@ RSpec.describe Healer do
   end
 
   # ============================================================
-  # Vitality Check (Single Responsibility)
-  # ============================================================
-
-  describe '#vitality_check' do
-    let(:healer) { build_healer }
-
-    it 'returns :healthy when touch shows no injuries' do
-      allow(DRC).to receive(:bput).and_return('no injuries to speak of')
-
-      expect(healer.send(:vitality_check, 'Tenuk')).to eq(:healthy)
-    end
-
-    it 'returns :vitality_damage when touch shows vitality' do
-      allow(DRC).to receive(:bput).and_return('vitality')
-
-      expect(healer.send(:vitality_check, 'Tenuk')).to eq(:vitality_damage)
-    end
-
-    it 'returns :dead when touch shows patient is dead' do
-      allow(DRC).to receive(:bput).and_return('He is dead')
-
-      expect(healer.send(:vitality_check, 'Tenuk')).to eq(:dead)
-    end
-
-    it 'returns :not_found when touch fails' do
-      allow(DRC).to receive(:bput).and_return('Touch what')
-
-      expect(healer.send(:vitality_check, 'Tenuk')).to eq(:not_found)
-    end
-  end
-
-  # ============================================================
   # VH Spell Slot State Machine (Liskov: all spell types share slot interface)
   # ============================================================
 
@@ -567,26 +541,22 @@ RSpec.describe Healer do
       expect(healer.get_patient('Tenuk')[:vh_attempted]).to be true
     end
 
-    it 'spams vit transfers and transitions to monitoring phase' do
+    it 'preps VH and transitions to prepping phase from start' do
       healer = build_healer
       healer.add_patient('Tenuk')
+      healer.instance_variable_set(:@vh_available, true)
+      healer.instance_variable_set(:@vh_spell, { name: 'Vitality Healing', mana: 5, cambrinth: [], prep_time: 3 })
       DRStats.health = 100
 
       healer.claim_spell_slot('Tenuk', :vitality)
       healer.send(:process_vitality_slot)
 
       task = healer.instance_variable_get(:@spell_task)
-      expect(task[:phase]).to eq(:monitoring)
-      expect(task[:vit_snapshot]).to eq(100)
-
-      # Should have sent 3 vit transfer commands
-      messages = []
-      messages << $sent_messages.pop until $sent_messages.empty?
-      vit_transfers = messages.select { |m| m.include?('transfer Tenuk vit quick') }
-      expect(vit_transfers.size).to eq(Healer::VIT_TRANSFER_COUNT)
+      expect(task[:phase]).to eq(:prepping)
+      expect(task[:prep_start]).not_to be_nil
     end
 
-    it 'transitions to vh_prepping when vitality drops significantly' do
+    it 're-preps VH for another round when patient still needs vitality' do
       healer = build_healer
       healer.add_patient('Tenuk')
       healer.instance_variable_set(:@vh_available, true)
@@ -594,30 +564,34 @@ RSpec.describe Healer do
 
       healer.claim_spell_slot('Tenuk', :vitality)
 
-      # Simulate start phase completed
       task = healer.instance_variable_get(:@spell_task)
-      task[:phase] = :monitoring
-      task[:vit_snapshot] = 100
+      task[:phase] = :recovering
+      task[:timer] = Time.now
 
-      # Vit dropped
-      DRStats.health = 80
+      DRStats.health = 95
+
+      low_vit = health_result(vitality: 50)
+      allow(DRCH).to receive(:perceive_health_other).with('Tenuk').and_return(low_vit)
 
       healer.send(:process_vitality_slot)
 
       task = healer.instance_variable_get(:@spell_task)
-      expect(task[:phase]).to eq(:vh_prepping)
+      expect(task[:phase]).to eq(:prepping)
     end
 
-    it 'releases slot when vitality stays stable at 95% or above' do
+    it 'releases slot when patient vitality is adequate after recovery' do
       healer = build_healer
       healer.add_patient('Tenuk')
 
       healer.claim_spell_slot('Tenuk', :vitality)
 
       task = healer.instance_variable_get(:@spell_task)
-      task[:phase] = :monitoring
-      task[:vit_snapshot] = 100
-      DRStats.health = 98
+      task[:phase] = :recovering
+      task[:timer] = Time.now
+      DRStats.health = 95
+
+      adequate_vit = health_result(vitality: 90)
+      allow(DRCH).to receive(:perceive_health_other).with('Tenuk').and_return(adequate_vit)
 
       healer.send(:process_vitality_slot)
 
@@ -625,27 +599,21 @@ RSpec.describe Healer do
       expect(healer.get_patient('Tenuk')[:vh_attempted]).to be true
     end
 
-    it 're-preps VH instead of re-spamming transfers when damage continues in recovery' do
+    it 'waits in recovering phase when health is between floor and stable threshold' do
       healer = build_healer
       healer.add_patient('Tenuk')
-      healer.instance_variable_set(:@vh_available, true)
-      healer.instance_variable_set(:@vh_spell, { name: 'Vitality Healing', mana: 5, cambrinth: [], prep_time: 3 })
 
       healer.claim_spell_slot('Tenuk', :vitality)
 
       task = healer.instance_variable_get(:@spell_task)
-      task[:phase] = :vh_recovering
-      task[:vit_snapshot] = 90
+      task[:phase] = :recovering
       task[:timer] = Time.now
-
-      # More damage landed
       DRStats.health = 75
 
       healer.send(:process_vitality_slot)
 
       task = healer.instance_variable_get(:@spell_task)
-      # Should go to vh_prepping, NOT back to start (no re-spam)
-      expect(task[:phase]).to eq(:vh_prepping)
+      expect(task[:phase]).to eq(:recovering)
     end
   end
 
