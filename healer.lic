@@ -742,19 +742,29 @@ class Healer
       return
     end
 
-    # Dead patient: blocking heal — takes priority over everything else.
-    # Dead characters can have massive wounds. We transfer all wounds via basic
-    # empathic link (no Unity), heal ourselves, repeat until both clean.
-    # No vitality transfer for dead patients.
+    # Dead patient: no Unity link, no vitality transfer.
+    # Wounds/poison/disease are handled through the normal interleaved flow.
     if victim_health.dead
-      DRC.log_window("Healer: #{victim} is DEAD - blocking heal", "familiar") unless patient_data[:touched]
-      heal_dead_patient(victim, victim_health)
-      return
+      DRC.log_window("Healer: #{victim} is DEAD", "familiar") unless patient_data[:touched]
+
+      # Fully clear -- whisper and remove
+      if victim_health.score == 0 && !victim_health.poisoned && !victim_health.diseased
+        heal_self
+        DRC.bput("whisper #{victim} You're dead -- get a cleric!", *WHISPER_RESPONSES)
+        Lich::Messaging.msg("bold", "Healer: Dead patient #{victim} cleared")
+        DRC.log_window("Healer: Dead #{victim} cleared", "familiar")
+        remove_patient(victim, reason: :dead_healed)
+        return
+      end
+
+      # Mark touched (no Unity link for dead patients) and fall through
+      # to wound/poison/disease handling below
+      update_patient(victim, touched: true, timer: Time.now) unless patient_data[:touched]
     end
 
-    # First encounter: upgrade to Unity link if patient has healable wounds
-    # Unity is for wound transfer only — not for poison/disease/vitality (those use basic empathic link from touch)
-    unless patient_data[:touched]
+    # First encounter (living patients): upgrade to Unity link if patient has healable wounds
+    # Unity is for wound transfer only -- not for poison/disease/vitality (those use basic empathic link from touch)
+    unless patient_data[:touched] || victim_health.dead
       if victim_health.score > 0 || victim_health.poisoned || victim_health.diseased
         DRC.log_window("Healer: New patient: #{victim}", "familiar")
         if has_healable_wounds?(victim_health)
@@ -840,81 +850,6 @@ class Healer
         log("Tended parasite on #{victim}'s #{body_part}")
       end
     end
-  end
-
-  # Blocking heal for a dead patient. Dead characters can have massive wounds
-  # and cannot be Unity linked. This blocks all other patient processing until
-  # the dead patient's wounds are fully transferred and we've healed ourselves.
-  # Uses basic empathic link (from touch) + redirect + transfer quick all.
-  # @param victim [String] patient name
-  # @param victim_health [HealthResult] initial health data
-  # @return [void]
-  def heal_dead_patient(victim, victim_health)
-    Lich::Messaging.msg("bold", "Healer: #{victim} is DEAD - blocking all other healing until clear")
-
-    loop do
-      # Check patient still in room
-      unless patient_in_room?(victim)
-        Lich::Messaging.msg("bold", "Healer: #{victim} left room during dead heal")
-        remove_patient(victim, reason: :left_room)
-        return
-      end
-
-      # Emergency check — bail if our own health is critical
-      if DRStats.health < EMERGENCY_VIT_THRESHOLD
-        Lich::Messaging.msg("bold", "Healer: Own health critical during dead heal, triggering emergency fall")
-        return # Let process_queue handle the emergency fall next cycle
-      end
-
-      # Re-perceive to get current wound state (touch refreshes empathic link)
-      victim_health = DRCH.perceive_health_other(victim)
-      unless victim_health
-        Lich::Messaging.msg("bold", "Healer: Lost contact with dead patient #{victim}")
-        remove_patient(victim, reason: :perceive_failed)
-        return
-      end
-
-      # Patient no longer dead (resurrected mid-heal) — return to normal flow
-      unless victim_health.dead
-        log("#{victim} is no longer dead, returning to normal healing")
-        update_patient(victim, touched: false)
-        return
-      end
-
-      # Wounds clear — dead patient fully transferred
-      if victim_health.score == 0
-        log("Dead patient #{victim} wounds fully transferred")
-        break
-      end
-
-      # Transfer one round of wounds
-      body_part = next_heal_location
-      unless body_part
-        log("No unwounded body parts, healing self before continuing dead heal")
-        heal_self
-        next
-      end
-
-      log("Dead heal: #{victim} (score: #{victim_health.score}) -> #{body_part}")
-      DRC.log_window("Healer: DEAD #{victim} (#{victim_health.score}) -> #{body_part}", "familiar")
-      DRC.bput("redirect all to #{body_part}", *REDIRECT_RESPONSES)
-
-      result = DRC.bput("transfer #{victim} quick all", *TRANSFER_RESPONSES)
-      if result =~ TRANSFER_NOT_FOUND_PATTERN
-        remove_patient(victim, reason: :not_found)
-        return
-      end
-
-      # Heal ourselves before next round
-      heal_self
-    end
-
-    # Final self-heal to ensure we're clean before resuming other patients
-    heal_self
-    DRC.bput("whisper #{victim} You're dead -- get a cleric!", *WHISPER_RESPONSES)
-    Lich::Messaging.msg("bold", "Healer: Dead patient #{victim} wounds cleared, resuming normal operation")
-    DRC.log_window("Healer: Dead #{victim} wounds cleared", "familiar")
-    remove_patient(victim, reason: :dead_healed)
   end
 
   # Transfers wounds from a patient.

@@ -342,7 +342,7 @@ RSpec.describe Healer do
   # ============================================================
 
   describe 'dead patient detection' do
-    it 'heals a dead patient fully then whispers to get a cleric' do
+    it 'transfers wounds from dead patient without blocking' do
       healer = build_healer(friends: ['Tenuk'])
       healer.add_patient('Tenuk')
       DRRoom.pcs = ['Tenuk']
@@ -352,13 +352,22 @@ RSpec.describe Healer do
         score: 9,
         wounds: { 'RIGHT LEG' => [wound(body_part: 'RIGHT LEG', severity: 2)] }
       )
-      dead_clear = health_result(dead: true, score: 0)
+      allow(DRCH).to receive(:perceive_health_other).with('Tenuk').and_return(dead_with_wounds)
 
-      # First perceive in heal_patient detects dead; re-perceive in loop sees
-      # wounds, then wounds cleared on the next iteration.
-      allow(DRCH).to receive(:perceive_health_other)
-        .with('Tenuk')
-        .and_return(dead_with_wounds, dead_with_wounds, dead_clear)
+      healer.send(:heal_patient, healer.get_patient('Tenuk'))
+
+      # Patient stays in queue -- non-blocking, will continue next cycle
+      expect(healer.patients).to have_key(:tenuk)
+      expect(healer.get_patient('Tenuk')[:touched]).to be true
+    end
+
+    it 'whispers and removes dead patient when wounds are clear' do
+      healer = build_healer(friends: ['Tenuk'])
+      healer.add_patient('Tenuk')
+      DRRoom.pcs = ['Tenuk']
+
+      dead_clear = health_result(dead: true, score: 0)
+      allow(DRCH).to receive(:perceive_health_other).with('Tenuk').and_return(dead_clear)
 
       expect(DRC).to receive(:bput)
         .with("whisper Tenuk You're dead -- get a cleric!", anything, anything, anything)
