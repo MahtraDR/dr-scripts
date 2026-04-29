@@ -101,6 +101,13 @@ class Healer
   ARRIVAL_PATTERN = /^(?:.+ )?(?<character>\w+) just arrived\.$/i.freeze
 
   # Patterns for teaching responses
+  TEACH_RESPONSES = [
+    'You begin to', 'is already listening to you', 'is listening to someone else',
+    'I could not find', 'You have already offered', 'That person is too busy',
+    'You are already teaching', 'You cannot teach two different classes',
+    'is not paying attention', 'You cannot listen to a teacher and teach',
+    'already trying to teach', 'trying to teach someone else'
+  ].freeze
 
   # Patterns for link responses
   LINK_SUCCESS_PATTERN = /Stretching your senses/.freeze
@@ -142,7 +149,7 @@ class Healer
     @allowed_characters = if friends.empty?
                             /(?!)/ # Never matches
                           else
-                            Regexp.new(friends.map { |f| Regexp.escape(f) }.join('|'), Regexp::IGNORECASE)
+                            Regexp.new("\\A(?:#{friends.map { |f| Regexp.escape(f) }.join('|')})\\z", Regexp::IGNORECASE)
                           end
 
     @patients = {} # name_key => { name:, body_part:, timer:, touched:, vh_attempted: }
@@ -405,7 +412,6 @@ class Healer
       next if @patients.key?(name_key(pc))
 
       add_patient(pc)
-      teach_character(pc)
     end
   end
 
@@ -694,7 +700,7 @@ class Healer
   # @param character [String] character name to teach
   # @return [void]
   def teach_character(character)
-    fput("teach scholarship to #{character}")
+    DRC.bput("teach scholarship to #{character}", *TEACH_RESPONSES)
   end
 
   # ============================================================
