@@ -80,6 +80,7 @@ module DRCM
 
     def check_wealth(*_args); 0; end
     def deposit_coins(*_args); end
+    def get_total_wealth; { 'kronars' => 0, 'lirums' => 0, 'dokoras' => 0 }; end
   end
 end
 
@@ -261,6 +262,53 @@ RSpec.describe SellLoot do
   end
 
   # =========================================================================
+  # #wait_for_clerk  (failover + retry across multiple gem-shop NPCs)
+  # =========================================================================
+  describe '#wait_for_clerk' do
+    it 'returns a single named clerk immediately without checking the room' do
+      expect(DRRoom).not_to receive(:npcs)
+      expect(build_instance.wait_for_clerk('Grishna')).to eq('Grishna')
+    end
+
+    it 'returns whichever configured candidate is present in the room' do
+      DRRoom.npcs = ['attendant']
+      expect(build_instance.wait_for_clerk(%w[Wickett attendant])).to eq('attendant')
+    end
+
+    it 'gives up and returns nil after exhausting all attempts when none appear' do
+      DRRoom.npcs = ['some shopper']
+      expect(build_instance.wait_for_clerk(%w[Wickett attendant])).to be_nil
+    end
+
+    it 'returns nil immediately without waiting when the clerk list is nil or empty' do
+      instance = build_instance
+      expect(instance).not_to receive(:pause)
+      expect(instance.wait_for_clerk(nil)).to be_nil
+      expect(instance.wait_for_clerk([])).to be_nil
+    end
+
+    it 'emits a verbose give-up message naming who and where it tried' do
+      DRRoom.npcs = []
+      messages = []
+      allow(DRC).to receive(:message) { |m| messages << m }
+      build_instance.wait_for_clerk(%w[Wickett attendant])
+      give_up = messages.find { |m| m.include?('gave up') }
+      expect(give_up).to include('Wickett and attendant')
+      expect(give_up).to include('gem-shop')
+    end
+
+    it 'retries CLERK_MAX_ATTEMPTS times, pausing between each, before giving up' do
+      DRRoom.npcs = []
+      # pause is a no-op in the harness; count how many times it is asked to wait.
+      pauses = 0
+      allow_any_instance_of(SellLoot).to receive(:pause) { pauses += 1 }
+      build_instance.wait_for_clerk(%w[Wickett attendant])
+      # One fewer pause than attempts: the final attempt gives up instead of waiting.
+      expect(pauses).to eq(SellLoot::CLERK_MAX_ATTEMPTS - 1)
+    end
+  end
+
+  # =========================================================================
   # #has_gems_to_sell?
   # =========================================================================
   describe '#has_gems_to_sell?' do
@@ -436,6 +484,16 @@ RSpec.describe SellLoot do
       expect(DRCT).not_to receive(:walk_to)
       build_instance.sell_gems('soft pouch')
     end
+
+    it 'skips selling but still closes the pouch when no clerk is present' do
+      instance = build_instance(hometown: make_hometown('gemshop' => { 'id' => 200, 'name' => %w[Wickett attendant] }))
+      DRRoom.npcs = []
+      stub_bput('open my soft pouch' => 'You open your')
+      allow(DRC).to receive(:get_gems).and_return(%w[ruby])
+      commands = capture_commands { instance.sell_gems('soft pouch') }
+      expect(commands.none? { |c| c.start_with?('sell my') }).to be true
+      expect(commands).to include('close my soft pouch')
+    end
   end
 
   # =========================================================================
@@ -483,6 +541,14 @@ RSpec.describe SellLoot do
       allow(DRCI).to receive(:get_item_list).and_return(nil)
       expect(DRCT).not_to receive(:walk_to)
       expect { build_instance.sell_metals_and_stones('sack') }.not_to raise_error
+    end
+
+    it 'does not sell when no configured clerk is present' do
+      instance = build_instance(hometown: make_hometown('gemshop' => { 'id' => 200, 'name' => %w[Wickett attendant] }))
+      DRRoom.npcs = []
+      allow(DRCI).to receive(:get_item_list).and_return(['small iron bar'])
+      commands = capture_commands { instance.sell_metals_and_stones('sack') }
+      expect(commands.none? { |c| c.start_with?('sell my') }).to be true
     end
   end
 
@@ -570,6 +636,17 @@ RSpec.describe SellLoot do
       # "soft pouch" shorthand matched differently and mis-restocked.
       expect(DRCI).to receive(:count_items_in_container).with('soft gem pouch', 'sack').and_return(5)
       build_instance(spare_gem_pouch_target: 5).check_spare_pouch('sack', 'soft')
+    end
+
+    it 'does not ask for pouches when no configured clerk is present' do
+      instance = build_instance(
+        spare_gem_pouch_target: 5,
+        hometown: make_hometown('gemshop' => { 'id' => 200, 'name' => %w[Wickett attendant] })
+      )
+      allow(DRCI).to receive(:count_items_in_container).and_return(0)
+      DRRoom.npcs = []
+      commands = capture_commands { instance.check_spare_pouch('sack', 'soft') }
+      expect(commands.none? { |c| c.start_with?('ask') }).to be true
     end
   end
 
@@ -723,6 +800,36 @@ RSpec.describe SellLoot do
   end
 
   # =========================================================================
+  # #coins_to_bank?
+  # =========================================================================
+  describe '#coins_to_bank?' do
+    it 'is true when local currency exceeds the keep-on-hand amount' do
+      allow(DRCM).to receive(:get_total_wealth).and_return('kronars' => 500, 'lirums' => 0, 'dokoras' => 0)
+      expect(build_instance(local_currency: 'kronars').coins_to_bank?(300)).to be true
+    end
+
+    it 'is false when local currency is at or below the keep-on-hand amount' do
+      allow(DRCM).to receive(:get_total_wealth).and_return('kronars' => 300, 'lirums' => 0, 'dokoras' => 0)
+      expect(build_instance(local_currency: 'kronars').coins_to_bank?(300)).to be false
+    end
+
+    it 'is true when only foreign currency is on hand (something to exchange)' do
+      allow(DRCM).to receive(:get_total_wealth).and_return('kronars' => 0, 'lirums' => 250, 'dokoras' => 0)
+      expect(build_instance(local_currency: 'kronars').coins_to_bank?(300)).to be true
+    end
+
+    it 'matches the local currency case-insensitively' do
+      allow(DRCM).to receive(:get_total_wealth).and_return('kronars' => 0, 'lirums' => 1000, 'dokoras' => 0)
+      # Muspar'i stores its currency as "Lirums"; the wealth hash keys are lower.
+      expect(build_instance(local_currency: 'Lirums').coins_to_bank?(300)).to be true
+    end
+
+    it 'is false when nothing is on hand' do
+      expect(build_instance(local_currency: 'kronars').coins_to_bank?(300)).to be false
+    end
+  end
+
+  # =========================================================================
   # .new orchestration -- the PR1 pre-flight guarantee and guards
   # =========================================================================
   describe 'orchestration' do
@@ -740,14 +847,29 @@ RSpec.describe SellLoot do
       SellLoot.new
     end
 
-    it 'never moves when the pre-flight finds no loot' do
+    it 'never moves when there is neither loot to sell nor excess coins to bank' do
       $test_settings = make_settings
       $test_data.town = { 'Crossing' => make_hometown }
       $test_data.items = items_data
       allow(DRC).to receive(:get_town_name).and_return('Crossing')
       allow_any_instance_of(SellLoot).to receive(:has_loot_to_sell?).and_return(false)
+      # DRCM.get_total_wealth defaults to all zeros.
       expect(DRCT).not_to receive(:walk_to)
+      expect(DRCM).not_to receive(:deposit_coins)
       expect_any_instance_of(SellLoot).not_to receive(:sell_gems)
+      SellLoot.new
+    end
+
+    it 'still exchanges and deposits excess coins even when there is no loot to sell' do
+      # Regression: the old preflight bailed the whole run on no loot, stranding
+      # coins already on hand instead of banking them.
+      $test_settings = make_settings
+      $test_data.town = { 'Crossing' => make_hometown }
+      $test_data.items = items_data
+      allow(DRC).to receive(:get_town_name).and_return('Crossing')
+      allow_any_instance_of(SellLoot).to receive(:has_loot_to_sell?).and_return(false)
+      allow(DRCM).to receive(:get_total_wealth).and_return('kronars' => 5000, 'lirums' => 0, 'dokoras' => 0)
+      expect(DRCM).to receive(:deposit_coins)
       SellLoot.new
     end
 
