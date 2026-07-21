@@ -1,58 +1,10 @@
 # frozen_string_literal: true
 
-load File.join(File.dirname(__FILE__), '..', 'test', 'test_harness.rb')
-include Harness
-
-def load_lic_class(filename, class_name)
-  return if Object.const_defined?(class_name)
-
-  filepath = File.join(File.dirname(__FILE__), '..', filename)
-  lines = File.readlines(filepath)
-
-  start_idx = lines.index { |l| l =~ /^class\s+#{class_name}\b/ }
-  raise "Could not find 'class #{class_name}' in #{filename}" unless start_idx
-
-  end_idx = nil
-  (start_idx + 1...lines.size).each do |i|
-    if lines[i] =~ /^end\s*$/
-      end_idx = i
-      break
-    end
-  end
-  raise "Could not find matching end for 'class #{class_name}' in #{filename}" unless end_idx
-
-  class_source = lines[start_idx..end_idx].join
-  eval(class_source, TOPLEVEL_BINDING, filepath, start_idx + 1)
-end
-
-def load_lic_constant(filename, const_name)
-  return if Object.const_defined?(const_name)
-
-  filepath = File.join(File.dirname(__FILE__), '..', filename)
-  lines = File.readlines(filepath)
-
-  line = lines.find { |l| l =~ /^#{const_name}\s*=/ }
-  raise "Could not find '#{const_name}' in #{filename}" unless line
-
-  eval(line, TOPLEVEL_BINDING, filepath)
-end
-
-module DRC
-  class << self
-    def bput(*_args); end
-    def message(_msg); end
-  end
-end unless defined?(DRC)
+require_relative 'spec_helper'
 
 def get_settings(*)
   {}
 end unless defined?(get_settings)
-
-module DRCA
-  class << self
-    def cast_spell(*_args); end
-  end
-end unless defined?(DRCA)
 
 class UserVars
   @@_data = {}

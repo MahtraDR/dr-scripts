@@ -19,38 +19,7 @@ require 'yaml'
 SCRIPT_DIR = Dir.mktmpdir('dr-scripts-test') unless defined?(SCRIPT_DIR)
 LICH_DIR = Dir.mktmpdir('lich-test') unless defined?(LICH_DIR)
 
-module Lich
-  module Messaging
-    def self.monsterbold(msg)
-      msg
-    end
-  end
-end
-
-$respond_messages = []
-def _respond(msg)
-  $respond_messages << msg
-end
-
-module Script
-  def self.current
-    OpenStruct.new(name: 'test-script')
-  end
-
-  def self.exists?(_name)
-    false
-  end
-end
-
 $clean_lich_char = ';'
-
-def checkname
-  'Testchar'
-end
-
-def echo(_msg)
-  # no-op in tests
-end
 
 # --- Extract methods from dependency.lic ---
 dep_path = File.join(File.dirname(__FILE__), '..', 'dependency.lic')
