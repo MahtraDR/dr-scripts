@@ -2,88 +2,11 @@
 
 require 'ostruct'
 
-# Load the shared test harness (Flags, DRStats, DRRoom, GameObj, fput, pause, ...).
-load File.join(File.dirname(__FILE__), '..', 'test', 'test_harness.rb')
-include Harness
-
-# Extract and eval the SellLoot class from sell-loot.lic without running the
-# top-level code (before_dying block and SellLoot.new) at the bottom of the file.
-#
-# @param filename [String] path to the .lic file relative to the repo root
-# @param class_name [String] the class to extract
-# @return [void]
-def load_lic_class(filename, class_name)
-  return if Object.const_defined?(class_name)
-
-  filepath = File.join(File.dirname(__FILE__), '..', filename)
-  lines = File.readlines(filepath)
-
-  start_idx = lines.index { |l| l =~ /^class\s+#{class_name}\b/ }
-  raise "Could not find 'class #{class_name}' in #{filename}" unless start_idx
-
-  end_idx = nil
-  (start_idx + 1...lines.size).each do |i|
-    if lines[i] =~ /^end\s*$/
-      end_idx = i
-      break
-    end
-  end
-  raise "Could not find matching end for 'class #{class_name}' in #{filename}" unless end_idx
-
-  class_source = lines[start_idx..end_idx].join
-  eval(class_source, TOPLEVEL_BINDING, filepath, start_idx + 1)
-end
+require_relative 'spec_helper'
 
 # The commons layer (DRC/DRCT/DRCI/DRCM) is not loadable in specs, so provide
 # minimal stub modules with safe defaults. Individual tests override specific
 # methods with `allow(...).to receive(...)`.
-module DRC
-  class << self
-    def bput(*_args); ''; end
-    def get_gems(*_args); []; end
-    def get_town_name(name); name; end
-    def release_invisibility; end
-    def left_hand; nil; end
-    def right_hand; nil; end
-    def message(*_args); end
-  end
-end
-
-module DRCT
-  class << self
-    def walk_to(*_args); true; end
-  end
-end
-
-module DRCI
-  class << self
-    def exists?(*_args); false; end
-    def get_item_list(*_args); []; end
-    def count_items_in_container(*_args); 0; end
-    def put_away_item?(*_args); true; end
-    def wear_item?(*_args); true; end
-  end
-end
-
-module DRCM
-  class << self
-    def convert_to_copper(amount, denom)
-      amount.to_i * case denom
-                    when 'copper' then 1
-                    when 'bronze' then 10
-                    when 'silver' then 100
-                    when 'gold' then 1000
-                    when 'platinum' then 10_000
-                    else 1
-                    end
-    end
-
-    def check_wealth(*_args); 0; end
-    def deposit_coins(*_args); end
-    def get_total_wealth; { 'kronars' => 0, 'lirums' => 0, 'dokoras' => 0 }; end
-  end
-end
-
 # The .lic instantiates EquipmentManager and calls empty_hands during init.
 class EquipmentManager
   def empty_hands; end
@@ -91,15 +14,18 @@ end
 
 load_lic_class('sell-loot.lic', 'SellLoot')
 
-RSpec.configure do |config|
-  config.before(:each) do
-    reset_data
+RSpec.describe SellLoot do
+  # World state this spec assumes (reset_data runs first, via spec_helper).
+  before(:each) do
     $CURRENCIES = %w[kronars lirums dokoras]
     $HOMETOWN_REGEX = /Crossing|Riverhaven/i
-  end
-end
 
-RSpec.describe SellLoot do
+    # Default navigation to succeed so shop-visit flows proceed. Examples that
+    # assert on walk_to override this; stubbing here (rather than relying on the
+    # module base) keeps the flow deterministic when other specs are co-loaded.
+    allow(DRCT).to receive(:walk_to).and_return(true)
+  end
+
   # -- fixtures ---------------------------------------------------------------
 
   # Build a fully-shaped hometown hash with every shop the script may query.
@@ -857,6 +783,32 @@ RSpec.describe SellLoot do
       expect(DRCT).not_to receive(:walk_to)
       expect(DRCM).not_to receive(:deposit_coins)
       expect_any_instance_of(SellLoot).not_to receive(:sell_gems)
+      SellLoot.new
+    end
+
+    it 'restocks spare gem pouches even when there is no loot to sell' do
+      # Regression: pouch restocking used to live inside the has_loot_to_sell?
+      # branch, so a run with nothing to sell silently let the spare pouches run
+      # dry. Restocking must be checked on its own, independent of selling.
+      $test_settings = make_settings(spare_gem_pouch_container: 'sack')
+      $test_data.town = { 'Crossing' => make_hometown }
+      $test_data.items = items_data
+      allow(DRC).to receive(:get_town_name).and_return('Crossing')
+      allow_any_instance_of(SellLoot).to receive(:has_loot_to_sell?).and_return(false)
+      expect_any_instance_of(SellLoot).to receive(:check_spare_pouch).with('sack', 'soft')
+      SellLoot.new
+    end
+
+    it 'does not restock when a spare container is set but the gem pouch adjective is unset' do
+      # validate_settings only guarantees gem_pouch_adjective when sell_loot_pouch
+      # is on; a nil adjective would ask the clerk for " pouch" and count
+      # " gem pouch" -- malformed commands -- so restocking must be skipped.
+      $test_settings = make_settings(spare_gem_pouch_container: 'sack', gem_pouch_adjective: nil)
+      $test_data.town = { 'Crossing' => make_hometown }
+      $test_data.items = items_data
+      allow(DRC).to receive(:get_town_name).and_return('Crossing')
+      allow_any_instance_of(SellLoot).to receive(:has_loot_to_sell?).and_return(false)
+      expect_any_instance_of(SellLoot).not_to receive(:check_spare_pouch)
       SellLoot.new
     end
 

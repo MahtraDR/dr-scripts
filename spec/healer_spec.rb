@@ -2,76 +2,9 @@
 
 require 'ostruct'
 
-load File.join(File.dirname(__FILE__), '..', 'test', 'test_harness.rb')
-include Harness
-
-def load_lic_class(filename, class_name)
-  return if Object.const_defined?(class_name)
-
-  filepath = File.join(File.dirname(__FILE__), '..', filename)
-  lines = File.readlines(filepath)
-
-  start_idx = lines.index { |l| l =~ /^class\s+#{class_name}\b/ }
-  raise "Could not find 'class #{class_name}' in #{filename}" unless start_idx
-
-  end_idx = nil
-  (start_idx + 1...lines.size).each do |i|
-    if lines[i] =~ /^end\s*$/
-      end_idx = i
-      break
-    end
-  end
-  raise "Could not find matching end for 'class #{class_name}' in #{filename}" unless end_idx
-
-  class_source = lines[start_idx..end_idx].join
-  eval(class_source, TOPLEVEL_BINDING, filepath, start_idx + 1)
-end
+require_relative 'spec_helper'
 
 # Minimal module stubs for modules not provided by the test harness
-module DRC
-  class << self
-    def bput(*_args)
-      ''
-    end
-
-    def wait_for_script_to_complete(*_args); end
-
-    def fix_standing; end
-
-    def log_window(_msg, _window = nil); end
-  end
-end unless defined?(DRC)
-
-module DRCH
-  class << self
-    def check_health
-      OpenStruct.new(wounds: {}, poisoned: false, diseased: false, score: 0, dead: false)
-    end
-
-    def perceive_health_other(_target)
-      OpenStruct.new(wounds: {}, parasites: {}, poisoned: false, diseased: false, score: 0, dead: false)
-    end
-  end
-end unless defined?(DRCH)
-
-module Lich
-  module Messaging
-    def self.msg(_style, _message); end
-  end
-
-  module Util
-    def self.issue_command(*_args)
-      []
-    end
-  end
-end unless defined?(Lich)
-
-# Provide start_script and DRSpells.known_spells if not already defined
-def start_script(*_args); end unless defined?(start_script)
-
-Harness::DRSpells.define_singleton_method(:known_spells) { @_known_spells || {} } unless Harness::DRSpells.respond_to?(:known_spells)
-Harness::DRSpells.define_singleton_method(:_set_known_spells) { |val| @_known_spells = val }
-
 load_lic_class('healer.lic', 'Healer')
 
 # Helper to build a Healer instance bypassing startup validations.
@@ -870,7 +803,8 @@ RSpec.describe Healer do
       healer.add_patient('Tenuk')
       healer.instance_variable_set(:@vh_available, true)
       healer.instance_variable_set(:@vh_spell, { name: 'Vitality Healing', mana: 5, cambrinth: [], prep_time: 0 })
-      DRStats.health = 65 # just above floor -> only 1 stream
+      healer.instance_variable_set(:@self_vit_floor, 60)
+      DRStats.health = 65 # just above the 60% floor -> thin headroom -> only 1 stream
 
       healer.claim_spell_slot('Tenuk', :vitality)
       task = healer.instance_variable_get(:@spell_task)
