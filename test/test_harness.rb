@@ -22,6 +22,14 @@ module Harness
     def self.active_spells
       @@_data_store['active_spells'] || {}
     end
+
+    def self._set_known_spells(val)
+      @@_data_store['known_spells'] = val
+    end
+
+    def self.known_spells
+      @@_data_store['known_spells'] || {}
+    end
   end
 
   class DRStats
@@ -275,9 +283,13 @@ module Harness
 
   class DRSkill
     @@_data_store = {}
+    @@_xp_store = {}
+    @@_modrank_store = {}
 
     def self._reset
       @@_data_store = {}
+      @@_xp_store = {}
+      @@_modrank_store = {}
     end
 
     def self._set_rank(skillname, val)
@@ -286,6 +298,30 @@ module Harness
 
     def self.getrank(skillname)
       @@_data_store[skillname] || 100
+    end
+
+    def self._set_xp(skillname, val)
+      @@_xp_store[skillname] = val
+    end
+
+    def self._reset_xp
+      @@_xp_store = {}
+    end
+
+    def self.getxp(skillname)
+      @@_xp_store[skillname] || 0
+    end
+
+    def self._set_modrank(skillname, val)
+      @@_modrank_store[skillname] = val
+    end
+
+    def self._reset_modrank
+      @@_modrank_store = {}
+    end
+
+    def self.getmodrank(skillname)
+      @@_modrank_store[skillname] || 0
     end
   end
 
@@ -450,6 +486,14 @@ module Harness
       $running_scripts.include?(script_name)
     end
 
+    def self.current
+      OpenStruct.new(name: 'test-script')
+    end
+
+    def self.exists?(_name)
+      false
+    end
+
     def self.at_exit(&_block); end
   end
 
@@ -524,12 +568,19 @@ module Harness
   end
 
   class EquipmentManager
+    def empty_hands; end
+
+    def remove_gear_by; end
+
+    def wear_items(_items); end
+
+    def wear_equipment_set?(_set_name); end
   end
 
   class Room
     def self.current
       Map.new(
-        :id => 1,
+        :id    => 1,
         :wayto => {
           2 => nil
         }
@@ -567,8 +618,18 @@ module Harness
   end
 
   class XMLData
+    @@_room_title = nil
+
+    def self._reset
+      @@_room_title = nil
+    end
+
     def self.room_title
-      'Middle of Nowhere'
+      @@_room_title || 'Middle of Nowhere'
+    end
+
+    def self.room_title=(val)
+      @@_room_title = val
     end
   end
 
@@ -598,7 +659,7 @@ module Harness
     # See test_bput as an example.
   end
 
-  def parse_args(data, flex_args = false)
+  def parse_args(_data, _flex_args = false)
     args = OpenStruct.new($parsed_args.dup || {})
     args.flex = 'test'
     args
@@ -637,6 +698,17 @@ module Harness
     $displayed_messages = []
     $running_scripts = []
 
+    # Captures for the Lich script seams (respond/start_script/stop_script).
+    $respond_messages = []
+    $started_scripts = []
+    $stopped_scripts = []
+
+    # Overridable character/state flags (default to a safe, inert value).
+    $sitting = false
+    $stunned = false
+    $bleeding = false
+    $charname = nil
+
     # Uses a queue for thread safety.
     # See assert_sends_messages method for usage.
     $sent_messages = Queue.new
@@ -658,6 +730,7 @@ module Harness
     DRSkill._reset
     DRRoom._reset
     Map._reset
+    XMLData._reset
   end
 
   def echo(message)
@@ -724,6 +797,43 @@ module Harness
 
   def sent_messages
     $sent_messages
+  end
+
+  # Raw Lich respond. Captured so specs can assert on script output.
+  def _respond(message = '')
+    $respond_messages << message
+  end
+
+  # Script lifecycle helpers. start_script/stop_script capture their calls so
+  # specs can assert which scripts were launched or killed; move/waitfor are
+  # inert seams that scripts call during navigation.
+  def start_script(name, *args)
+    $started_scripts << [name, *args]
+  end
+
+  def stop_script(name)
+    $stopped_scripts << name
+  end
+
+  def move(*_args); end
+
+  def waitfor(*_args); end
+
+  # Character/state seams with test-overridable globals.
+  def checkname
+    $charname || 'Testchar'
+  end
+
+  def sitting?
+    $sitting || false
+  end
+
+  def stunned?
+    $stunned || false
+  end
+
+  def bleeding?
+    $bleeding || false
   end
 
   def health=(health)
@@ -798,10 +908,6 @@ module Harness
 
   def send_slackbot_message(message); end
 
-  def get
-    get?
-  end
-
   def clear; end
 
   def get_character_setting
@@ -841,7 +947,7 @@ module Harness
   end
 
   # Copied from lich.rbw
-  def force_start_script(script_name, cli_vars=[], flags={})
+  def force_start_script(script_name, cli_vars = [], flags = {})
   end
 
   def assert_sends_messages(expected_messages)
@@ -871,7 +977,7 @@ module Harness
   end
 
   def assert_displayed_messages_include_any(phrases)
-    proc do |error|
+    proc do |_error|
       result = $displayed_messages.any? do |message|
         phrases.any? do |phrase|
           message.include?(phrase)
@@ -888,4 +994,221 @@ module Harness
     end
   end
 
+  # ---------------------------------------------------------------------------
+  # Commons command-module stubs (DRC, DRCI, DRCC, ...).
+  #
+  # The commons layer cannot be loaded in specs, so these modules provide the
+  # union of the methods the scripts call, with neutral defaults (heuristics --
+  # a few methods return domain values like DRC.bput -> 'Roundtime'):
+  #   - presence / "did it happen" predicates default to false,
+  #   - "did the action succeed" checks default to true,
+  #   - collection / count accessors default to [] / 0 / {},
+  #   - most other methods are an inert nil-returning seam.
+  # Individual specs override the handful of returns they assert on with
+  # per-example `allow(...).to receive(...)`. Centralizing them here (rather
+  # than redefining them in each spec) keeps a single, consistent stub surface
+  # so co-running specs cannot clobber each other's game doubles.
+  #
+  # Add new commons methods here (matching the default conventions above); do
+  # not stub them in a single spec. See the "Shared game doubles" section in
+  # spec/spec_helper.rb for the full rationale.
+  # ---------------------------------------------------------------------------
+
+  # Derive the trailing noun of an item long-name (mirrors DRC.get_noun).
+  def self._noun(long_name)
+    long_name.to_s.strip.scan(/[a-z\-']+$/i).first
+  end
+
+  module DRC
+    class << self
+      def bput(*_args); 'Roundtime'; end
+      def left_hand; $left_hand; end
+      def right_hand; $right_hand; end
+      def left_hand_noun; Harness._noun($left_hand); end
+      def right_hand_noun; Harness._noun($right_hand); end
+      def get_noun(long_name); Harness._noun(long_name); end
+      def get_gems(*_args); []; end
+      def get_town_name(name); name; end
+      def text2num(text); text; end
+      def message(*_args); end
+      def wait_for_script_to_complete(*_args); end
+      def fix_standing; end
+      def release_invisibility; end
+      def beep; end
+      def hide?(*_args); false; end
+      def forage?(*_args); false; end
+      def collect(*_args); end
+      def retreat(*_args); end
+      def rummage(*_args); end
+      def log_window(*_args); end
+    end
+  end
+
+  module DRCI
+    class << self
+      def in_hands?(*_args); false; end
+      def in_left_hand?(*_args); false; end
+      def in_right_hand?(*_args); false; end
+      def exists?(*_args); false; end
+      def lift?(*_args); false; end
+      def wearing?(*_args); false; end
+      def inside?(*_args); false; end
+      def get_item?(*_args); true; end
+      def get_item_if_not_held?(*_args); true; end
+      def get_item_unsafe(*_args); end
+      def get_item(*_args); end
+      def put_away_item?(*_args); true; end
+      def put_away_item_unsafe?(*_args); true; end
+      def remove_item?(*_args); true; end
+      def wear_item?(*_args); true; end
+      def lower_item?(*_args); true; end
+      def stow_item?(*_args); true; end
+      def stow_hand(*_args); true; end
+      def stow_hands(*_args); true; end
+      def untie_item?(*_args); true; end
+      def tie_gem_pouch?(*_args); true; end
+      def swap_out_full_gempouch?(*_args); true; end
+      def fill_gem_pouch_with_container(*_args); end
+      def open_container?(*_args); true; end
+      def dispose_trash(*_args); end
+      def get_item_list(*_args); []; end
+      def get_box_list_in_container(*_args); []; end
+      def count_items_in_container(*_args); 0; end
+      def count_all_boxes(*_args); 0; end
+      def count_lockpick_container(*_args); 0; end
+    end
+  end
+
+  module DRCC
+    class << self
+      def check_for_existing_sigil?(*_args); true; end
+      def get_adjust_tongs?(*_args); true; end
+      def stow_crafting_item(*_args); true; end
+      def get_crafting_item(*_args); end
+      def logbook_item(*_args); end
+      def order_enchant(*_args); end
+      def repair_own_tools(*_args); end
+      def check_consumables(*_args); end
+      def find_recipe2(*_args); end
+      def find_grindstone(*_args); end
+      def find_empty_crucible(*_args); end
+      def find_enchanting_room(*_args); end
+      def find_sewing_room(*_args); end
+      def find_shaping_room(*_args); end
+      def fount(*_args); end
+    end
+  end
+
+  module DRCM
+    class << self
+      def ensure_copper_on_hand(*_args); true; end
+      def wealth(*_args); 0; end
+      def check_wealth(*_args); 0; end
+      def get_total_wealth(*_args); {}; end
+      def convert_to_copper(amount, _denom = nil); amount.to_i; end
+      def minimize_coins(*_args); []; end
+      def deposit_coins(*_args); end
+    end
+  end
+
+  module DRCT
+    class << self
+      def walk_to(*_args); true; end
+      def sort_destinations(ids); ids; end
+      def buy_item(*_args); end
+      def order_item(*_args); end
+      def dispose(*_args); end
+      def refill_lockpick_container(*_args); end
+    end
+  end
+
+  module DRCH
+    class << self
+      def check_health(*_args); { 'score' => 0, 'bleeders' => [], 'poisoned' => false, 'diseased' => false }; end
+      def has_tendable_bleeders?(*_args); false; end
+      def bind_wound(*_args); end
+      def perceive_health(*_args); end
+      def perceive_health_other(*_args); end
+    end
+  end
+
+  module DRCA
+    class << self
+      def cast?(*_args); true; end
+      def cast_spell?(*_args); true; end
+      def prepare?(*_args); true; end
+      def segue?(*_args); true; end
+      def activate_khri?(*_args); true; end
+      def activate_barb_buff?(*_args); true; end
+      def shatter_regalia?(*_args); true; end
+      def cast_spell(*_args); end
+      def cast_spells(*_args); end
+      def check_discern(*_args); end
+      def check_elemental_charge(*_args); end
+      def check_to_harness(*_args); end
+      def crafting_magic_routine(*_args); end
+      def find_cambrinth(*_args); end
+      def infuse_om(*_args); end
+      def invoke(*_args); end
+      def parse_regalia(*_args); end
+      def perc_aura(*_args); end
+      def perc_mana(*_args); end
+      def release_cyclics(*_args); end
+      def stow_cambrinth(*_args); end
+      def update_avtalia(*_args); end
+    end
+  end
+
+  module DRCS
+    class << self
+      def summon_weapon(*_args); end
+      def summon_admittance(*_args); end
+      def break_summoned_weapon(*_args); end
+      def pull_summoned_weapon(*_args); end
+      def push_summoned_weapon(*_args); end
+      def shape_summoned_weapon(*_args); end
+      def turn_summoned_weapon(*_args); end
+    end
+  end
+
+  module DRCMM
+    class << self
+      def any_celestial_object?(*_args); false; end
+      def bright_celestial_object?(*_args); false; end
+      def hold_moon_weapon?(*_args); false; end
+      def wear_moon_weapon?(*_args); false; end
+      def moon_used_to_summon_weapon(*_args); end
+      def get_telescope?(*_args); true; end
+      def store_telescope?(*_args); true; end
+      def store_div_tool?(*_args); true; end
+      def observe(*_args); end
+      def predict(*_args); end
+      def study_sky(*_args); end
+      def align(*_args); end
+      def roll_bones(*_args); end
+      def use_div_tool(*_args); end
+      def center_telescope(*_args); end
+      def peer_telescope(*_args); []; end
+    end
+  end
+
+  module DRCTH
+    class << self
+      def sprinkle_holy_water?(*_args); true; end
+      def wave_incense?(*_args); true; end
+      def empty_cleric_hands(*_args); end
+    end
+  end
+
+  module Lich
+    module Messaging
+      def self.msg(*_args); end
+      def self.monsterbold(text); text; end
+      def self.stream_window(*_args); end
+    end
+
+    module Util
+      def self.issue_command(*_args); []; end
+    end
+  end
 end

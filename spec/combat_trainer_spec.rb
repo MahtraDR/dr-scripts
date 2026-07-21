@@ -11,138 +11,11 @@
 
 require 'ostruct'
 
-load File.join(File.dirname(__FILE__), '..', 'test', 'test_harness.rb')
-include Harness
-
-def load_lic_class(filename, class_name)
-  return if Object.const_defined?(class_name)
-
-  filepath = File.join(File.dirname(__FILE__), '..', filename)
-  lines = File.readlines(filepath)
-
-  start_idx = lines.index { |l| l =~ /^class\s+#{class_name}\b/ }
-  raise "Could not find 'class #{class_name}' in #{filename}" unless start_idx
-
-  end_idx = nil
-  (start_idx + 1...lines.size).each do |i|
-    if lines[i] =~ /^end\s*$/
-      end_idx = i
-      break
-    end
-  end
-  raise "Could not find matching end for 'class #{class_name}' in #{filename}" unless end_idx
-
-  class_source = lines[start_idx..end_idx].join
-  eval(class_source, TOPLEVEL_BINDING, filepath, start_idx + 1)
-end
+require_relative 'spec_helper'
 
 # -- Module stubs --
 # Each stub provides the minimum interface combat-trainer calls.
 # Methods default to safe no-ops; tests override via allow().
-
-module DRC
-  class << self
-    def bput(*_args) = 'Roundtime'
-    def message(*_args) = nil
-    def fix_standing = nil
-    def retreat = nil
-    def right_hand = $right_hand
-    def left_hand = $left_hand
-    def right_hand_noun = $right_hand
-    def left_hand_noun = $left_hand
-    def wait_for_script_to_complete(*_args) = nil
-    def hide?(*_args) = true
-    def rummage(*_args) = []
-    def beep = nil
-  end
-end
-
-module DRCI
-  class << self
-    def lower_item?(*_args) = true
-    def get_item?(*_args) = true
-    def get_item_unsafe(*_args) = true
-    def dispose_trash(*_args) = nil
-    def wear_item?(*_args) = true
-    def put_away_item?(*_args) = true
-    def in_hands?(*_args) = false
-    def inside?(*_args) = false
-    def fill_gem_pouch_with_container(*_args) = nil
-    def count_all_boxes(*_args) = 0
-    # -- union additions from merged specs --
-    def stow_item?(*_args) = true
-    def remove_item?(*_args) = true
-    def wearing?(*_args) = false
-    def swap_out_full_gempouch?(*_args) = true
-    def get_item_if_not_held?(*_args) = true
-    def exists?(*_args) = true
-  end
-end
-
-module DRCA
-  class << self
-    def prepare?(*_args) = true
-    def cast?(*_args) = true
-    def release_cyclics(*_args) = nil
-    def cast_spell(*_args) = nil
-    def shatter_regalia?(*_args) = nil
-    def parse_regalia = []
-    def check_elemental_charge = 0
-    def invoke(*_args) = nil
-    def find_cambrinth(*_args) = nil
-    def stow_cambrinth(*_args) = nil
-    def check_to_harness(*_args) = false
-    def segue?(*_args) = nil
-    def activate_barb_buff?(*_args) = true
-    def activate_khri?(*_args) = true
-    def infuse_om(*_args) = nil
-    def update_avtalia = nil
-    def perc_aura = {}
-  end
-end
-
-module DRCH
-  class << self
-    def bind_wound(*_args) = nil
-    def check_health = { 'wounds' => {} }
-    def perceive_health = { 'wounds' => {} }
-    def has_tendable_bleeders? = false
-  end
-end
-
-module DRCMM
-  class << self
-    def wear_moon_weapon? = false
-    def hold_moon_weapon? = false
-    def moon_used_to_summon_weapon = nil
-    def bright_celestial_object? = false
-    def any_celestial_object? = false
-    def peer_telescope(*_args) = nil
-  end
-end
-
-module DRCS
-  class << self
-    def break_summoned_weapon(*_args) = nil
-    def summon_weapon(*_args) = nil
-    def shape_summoned_weapon(*_args) = nil
-    def turn_summoned_weapon(*_args) = nil
-    def push_summoned_weapon(*_args) = nil
-    def pull_summoned_weapon(*_args) = nil
-  end
-end
-
-module DRCTH
-  class << self
-    def sprinkle_holy_water?(*_args) = true
-    def wave_incense?(*_args) = true
-    def empty_cleric_hands(*_args) = nil
-  end
-end
-
-module Script
-  def self.running?(*_args) = false
-end
 
 # Unified UserVars store. Backs every UserVars key the combat-trainer code
 # and the merged specs touch (moons, sun, discerns, friends, warhorn,
@@ -242,12 +115,6 @@ load_lic_class('combat-trainer.lic', 'SafetyProcess')
 load_lic_class('combat-trainer.lic', 'SpellProcess')
 load_lic_class('combat-trainer.lic', 'PetProcess')
 load_lic_class('combat-trainer.lic', 'TrainerProcess')
-
-RSpec.configure do |config|
-  config.before(:each) do
-    reset_data
-  end
-end
 
 # Shared setup for combat-trainer tests that need game state stubs.
 # Include in each describe block via: before(:each) { ct_setup }
