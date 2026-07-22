@@ -1758,7 +1758,10 @@ class ScrollStack
     msg("Unwanted scrolls: #{total_removed} trashed, #{total_stowed} stowed")
   end
 
-  # Merges duplicate stacks of each spell into the largest stack.
+  # Merges duplicate stacks of each spell into the largest stack, honoring the
+  # per-spell cap. Two-phase per source so both hands are never needed at once:
+  # pull the source's copies into the pack, put the source down, then push them
+  # into the target.
   #
   # @param consolidatable [Hash] spell => locations
   # @return [void]
@@ -1768,84 +1771,170 @@ class ScrollStack
 
       sorted_locs = locations.sort_by { |loc| -loc[:count] }
       target_loc = sorted_locs.first
-      source_locs = sorted_locs[1..]
+      source_locs = sorted_locs[1..] || []
 
-      scrolls_moved = 0
-      scrolls_trashed = 0
+      moved = 0
 
       source_locs.each do |source|
-        source_count = source[:count]
-        next if source_count.zero?
+        next if source[:count].zero?
 
-        with_stacker(source[:stacker_obj]['name']) do
-          open_stacker(source[:stacker_obj]['name'])
+        pulled = pull_slot_into_pack(source[:stacker_obj], source[:slot], spell_name, source[:count])
+        next if pulled.zero?
 
-          unless turn_to_spell(source[:stacker_obj]['name'], spell_name)
-            msg("ERROR: Failed to turn to #{spell_name}")
-            next
-          end
-          waitrt?
+        room = @max_scrolls_per_spell ? [@max_scrolls_per_spell - target_loc[:count], 0].max : pulled
+        to_push = [pulled, room].min
 
-          source_count.times do
-            result = pull_scroll(source[:stacker_obj]['name'])
+        pushed = push_pack_into_target(target_loc[:stacker_obj], spell_name, to_push)
+        target_loc[:count] += pushed
+        moved += pushed
 
-            break if result.match?(PULL_EMPTY_PATTERN)
-
-            if @max_scrolls_per_spell && target_loc[:count] >= @max_scrolls_per_spell
-              if @trash_scrolls
-                dispose_scroll('scroll')
-                scrolls_trashed += 1
-              else
-                DRCI.stow_item?('scroll')
-              end
-              next
-            end
-
-            if push_scroll_to_target(target_loc, spell_name)
-              scrolls_moved += 1
-              target_loc[:count] += 1
-            elsif @trash_scrolls
-              dispose_scroll('scroll')
-              scrolls_trashed += 1
-            end
-          end
-
-          source[:stacker_obj]['contents'][source[:slot]] = []
-        end
+        dispose_leftover_from_pack(pulled - pushed)
       end
 
-      target_loc[:stacker_obj]['contents'][target_loc[:slot]][1] = target_loc[:count]
-
-      msg("  #{spell_name}: Moved #{scrolls_moved}, Trashed #{scrolls_trashed}")
+      msg("  #{spell_name}: Moved #{moved}")
     end
   end
 
-  # Pushes a held scroll into a target location's section.
+  # ==========================================================================
+  # Two-phase move helpers (pull source -> pack, then push pack -> target),
+  # shared by clean-consolidation and the consolidate command. Keeping the two
+  # stacker interactions separate means only one stacker plus one scroll is ever
+  # in hand at a time.
+  # ==========================================================================
+
+  # Pulls up to +count+ copies of a spell out of one source slot and stows them
+  # in the pack, updating the source cache slot. The source stacker is the only
+  # item in hand during this phase.
   #
-  # @note Known limitation (Q2): this opens the target stacker while the source
-  #   stacker and a pulled scroll may already occupy both hands; left as-is by
-  #   request. Behavior is unchanged from prior versions.
-  # @param target_loc [Hash] target location ({stacker_obj:, slot:, count:})
-  # @param spell_name [String] the spell being moved
-  # @return [Boolean] true on success
-  def push_scroll_to_target(target_loc, spell_name)
-    return false unless scroll_in_hand?
+  # @param stacker [Hash] the source stacker cache entry
+  # @param slot_idx [Integer] the source slot index
+  # @param spell_name [String] the spell to pull
+  # @param count [Integer] how many copies to pull
+  # @return [Integer] the number actually pulled into the pack
+  def pull_slot_into_pack(stacker, slot_idx, spell_name, count)
+    return 0 if count <= 0
 
-    pushed = false
+    pulled = 0
 
-    with_stacker(target_loc[:stacker_obj]['name']) do
-      open_stacker(target_loc[:stacker_obj]['name'])
+    with_stacker(stacker['name']) do
+      open_stacker(stacker['name'])
 
-      turn_to_spell(target_loc[:stacker_obj]['name'], spell_name)
+      if turn_to_spell(stacker['name'], spell_name)
+        waitrt?
+
+        count.times do
+          result = pull_scroll(stacker['name'])
+          break if result.match?(PULL_EMPTY_PATTERN)
+
+          stow_pulled_scroll
+          pulled += 1
+
+          if result.match?(PULL_LAST_PATTERN)
+            stacker['contents'][slot_idx] = []
+            break
+          else
+            stacker['contents'][slot_idx][1] -= 1
+          end
+        end
+      else
+        msg("ERROR: Failed to turn to #{spell_name} in #{stacker['name']}")
+      end
+    end
+
+    pulled
+  end
+
+  # Pushes up to +count+ pack scrolls into the target stacker, updating the
+  # target cache. The target stacker is the only stacker in hand during this
+  # phase; a scroll is fetched from the pack immediately before each push.
+  #
+  # @param target_stacker [Hash] the target stacker cache entry
+  # @param spell_name [String] the spell being pushed
+  # @param count [Integer] how many to push
+  # @return [Integer] the number actually pushed
+  def push_pack_into_target(target_stacker, spell_name, count)
+    return 0 if count <= 0
+
+    pushed = 0
+
+    with_stacker(target_stacker['name']) do
+      open_stacker(target_stacker['name'])
+      turn_to_spell(target_stacker['name'], spell_name)
       waitrt?
 
-      result = DRC.bput("push my #{target_loc[:stacker_obj]['name']} with my scroll",
-                        PUSH_EXISTING_SUCCESS_PATTERN, PUSH_FULL_PATTERN, *PUSH_FAIL_PATTERNS, PUSH_TIMEOUT)
+      count.times do
+        break unless get_pulled_scroll
 
-      pushed = result.match?(PUSH_EXISTING_SUCCESS_PATTERN)
+        result = DRC.bput("push my #{target_stacker['name']} with my scroll",
+                          PUSH_EXISTING_SUCCESS_PATTERN, PUSH_NEW_SUCCESS_PATTERN,
+                          PUSH_FULL_PATTERN, *PUSH_FAIL_PATTERNS, PUSH_TIMEOUT)
+
+        if result.match?(PUSH_EXISTING_SUCCESS_PATTERN) || result.match?(PUSH_NEW_SUCCESS_PATTERN)
+          pushed += 1
+          update_target_cache(target_stacker, spell_name)
+        else
+          msg("WARNING: Could not push #{spell_name} into #{target_stacker['name']}; leaving it stowed")
+          stow_pulled_scroll
+          break
+        end
+      end
     end
 
     pushed
+  end
+
+  # Increments the target cache for a just-pushed scroll, creating a new slot
+  # entry when the spell is not already present. Pure cache mutation.
+  #
+  # @param target_stacker [Hash] the target stacker cache entry
+  # @param spell_name [String] the spell that was pushed
+  # @return [void]
+  def update_target_cache(target_stacker, spell_name)
+    existing = target_stacker['contents'].find { |data| data&.first == spell_name }
+    if existing
+      existing[1] += 1
+    else
+      empty_idx = target_stacker['contents'].index { |data| slot_empty?(data) }
+      target_stacker['contents'][empty_idx] = [spell_name, 1] if empty_idx
+    end
+  end
+
+  # Stows the scroll currently in hand into the pack (or stacker container).
+  #
+  # @return [Boolean]
+  def stow_pulled_scroll
+    if @stacker_container
+      DRCI.put_away_item?('scroll', @stacker_container)
+    else
+      DRCI.stow_item?('scroll')
+    end
+  end
+
+  # Fetches one stowed scroll back into hand from the pack (or stacker container).
+  #
+  # @return [Boolean] true when a scroll was retrieved
+  def get_pulled_scroll
+    if @stacker_container
+      DRCI.get_item?('scroll', @stacker_container)
+    else
+      DRCI.get_item?('scroll')
+    end
+  end
+
+  # Disposes of scrolls left in the pack after a move (over-cap or push-failed).
+  # Only trashes when trash_excess_scrolls is set; otherwise they stay stowed.
+  #
+  # @param count [Integer] how many leftover scrolls to trash
+  # @return [void]
+  def dispose_leftover_from_pack(count)
+    return if count <= 0
+    return unless @trash_scrolls
+
+    count.times do
+      break unless get_pulled_scroll
+
+      dispose_scroll('scroll')
+    end
   end
 
   # ==========================================================================
@@ -2354,8 +2443,9 @@ class ScrollStack
   end
 
   # Executes a consolidation plan, moving each scroll to its target stacker.
+  # Two-phase per move (pull source -> pack, then push pack -> target) so both
+  # stackers are never needed in hand simultaneously.
   #
-  # @note Known limitation (Q2): see {#push_to_target_stacker}.
   # @param plan [Hash] a plan from {#build_consolidation_plan}
   # @return [void]
   def execute_consolidation_plan(plan)
@@ -2365,89 +2455,24 @@ class ScrollStack
     slots_freed = 0
 
     plan[:moves].each do |move|
-      source = move[:source_stacker_obj]
-      target = move[:target_stacker_obj]
-      spell_name = move[:spell]
-      count = move[:count]
+      msg("Moving #{move[:count]} #{move[:spell]}: #{move[:source_stacker_name]} -> #{move[:target_stacker_name]}...")
 
-      msg("Moving #{count} #{spell_name}: #{move[:source_stacker_name]} -> #{move[:target_stacker_name]}...")
+      pulled = pull_slot_into_pack(move[:source_stacker_obj], move[:source_slot], move[:spell], move[:count])
+      next if pulled.zero?
 
-      moved_this_spell = 0
+      pushed = push_pack_into_target(move[:target_stacker_obj], move[:spell], pulled)
+      scrolls_moved += pushed
+      slots_freed += 1
 
-      with_stacker(source['name']) do
-        open_stacker(source['name'])
-
-        unless turn_to_spell(source['name'], spell_name)
-          msg("ERROR: Failed to turn to #{spell_name} in #{source['name']}")
-          next
-        end
-        waitrt?
-
-        count.times do
-          result = pull_scroll(source['name'])
-
-          break if result.match?(PULL_EMPTY_PATTERN)
-
-          if push_to_target_stacker(target, spell_name)
-            moved_this_spell += 1
-            scrolls_moved += 1
-          else
-            msg("ERROR: Failed to push #{spell_name} to #{target['name']}")
-            DRCI.stow_item?('scroll')
-          end
-
-          if result.match?(PULL_LAST_PATTERN)
-            source['contents'][move[:source_slot]] = []
-            break
-          else
-            source['contents'][move[:source_slot]][1] -= 1
-          end
-        end
-      end
-
-      slots_freed += 1 if moved_this_spell > 0
+      # Anything pulled but not accepted by the target stays stowed in the pack
+      # (never silently destroyed); trash only when explicitly configured.
+      dispose_leftover_from_pack(pulled - pushed)
     end
 
     msg("Consolidation complete! Moved #{scrolls_moved} scroll(s), freed #{slots_freed} slot(s)")
 
     UserVars.stackers = nil
     populate_stackers(force_refresh: true)
-  end
-
-  # Pushes a held scroll into a target stacker (existing or new section).
-  #
-  # @note Known limitation (Q2): this opens the target stacker while the source
-  #   stacker and a pulled scroll may already occupy both hands; left as-is by
-  #   request. Behavior is unchanged from prior versions.
-  # @param target_stacker [Hash] the target stacker cache entry
-  # @param spell_name [String] the spell being moved
-  # @return [Boolean] true on success
-  def push_to_target_stacker(target_stacker, spell_name)
-    return false unless scroll_in_hand?
-
-    pushed = false
-
-    with_stacker(target_stacker['name']) do
-      open_stacker(target_stacker['name'])
-
-      result = DRC.bput("push my #{target_stacker['name']} with my scroll",
-                        PUSH_EXISTING_SUCCESS_PATTERN, PUSH_NEW_SUCCESS_PATTERN,
-                        PUSH_FULL_PATTERN, *PUSH_FAIL_PATTERNS, PUSH_TIMEOUT)
-
-      pushed = result.match?(PUSH_EXISTING_SUCCESS_PATTERN) || result.match?(PUSH_NEW_SUCCESS_PATTERN)
-
-      if pushed
-        existing = target_stacker['contents'].find { |data| data&.first == spell_name }
-        if existing
-          existing[1] += 1
-        else
-          empty_idx = target_stacker['contents'].index { |data| slot_empty?(data) }
-          target_stacker['contents'][empty_idx] = [spell_name, 1] if empty_idx
-        end
-      end
-    end
-
-    pushed
   end
 end
 

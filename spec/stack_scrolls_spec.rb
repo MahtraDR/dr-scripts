@@ -621,6 +621,29 @@ RSpec.describe ScrollStack do
     end
   end
 
+  # ===========================================================================
+  # update_target_cache -- pure cache mutation behind the two-phase move
+  # ===========================================================================
+  describe '#update_target_cache' do
+    it 'increments an existing section for the spell' do
+      target = stacker('a', [['Heal', 3], []])
+      script.update_target_cache(target, 'Heal')
+      expect(target['contents']).to eq([['Heal', 4], []])
+    end
+
+    it 'creates a new section in the first empty slot for a new spell' do
+      target = stacker('a', [['Heal', 3], []])
+      script.update_target_cache(target, 'Fire')
+      expect(target['contents']).to eq([['Heal', 3], ['Fire', 1]])
+    end
+
+    it 'leaves the cache unchanged when the spell is new and no slot is free' do
+      target = stacker('a', [['Heal', 3]])
+      script.update_target_cache(target, 'Fire')
+      expect(target['contents']).to eq([['Heal', 3]])
+    end
+  end
+
   describe '#spell_abbrev' do
     it 'returns the abbreviation from spell data' do
       allow(script).to receive(:get_data).with('spells')
