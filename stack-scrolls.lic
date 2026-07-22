@@ -7,6 +7,24 @@
   Documentation: https://elanthipedia.play.net/Lich_script_repository#stack-scrolls
 
   Changelog:
+    3.1.1 (2026-07-22) - Review fixes from in-game smoke test (PR #7478)
+      - BUGFIX: `consolidate confirm` could not move scrolls. The planner
+        describes the FINAL distribution, but moves were executed in a fixed
+        (alphabetical) order, so an inbound push into a stacker that was still
+        full -- because the sections leaving it were scheduled later -- hit
+        "no more room" and the run stalled on the first move. Execution now
+        goes through a capacity-aware ordering (order_consolidation_moves) that
+        only pushes into a target with room (an existing section to merge into,
+        or a free slot), freeing source slots to unblock the rest.
+      - BUGFIX: the consolidation push phase issued `turn <stacker> to <spell>`
+        before pushing. For a brand-new section the game replies "That spell
+        does not appear to be available", which is not a turn-failure pattern,
+        so each new-section push blocked for the full 15s bput timeout. The turn
+        is unnecessary (a push auto-files the scroll into its section), so it was
+        removed -- matching the container-stacking path that never turns.
+      - CHANGE: `worn_trashcan` / `worn_trashcan_verb` are read from the SHARED
+        top-level settings (as other scripts do), not from a `stack_scrolls:`
+        bucket; the migration guide no longer tells you to move or remove them.
     3.1.0 (2026-07-22) - Upstream-reconciliation for EO submission
       - CHANGE: excess (unstackable) scrolls now STOW by default; set
         trash_excess_scrolls: true to trash them instead (was trash-by-default)
@@ -56,11 +74,14 @@
 #   - `discard_scrolls` [Array<String>] blacklist; takes priority over keep (optional)
 #   - `trash_excess_scrolls` [Boolean] trash (true) or stow (false) excess that
 #     will not fit in the stackers; default false (stow)
-#   - `worn_trashcan` [String] worn trash receptacle for disposal (optional)
-#   - `worn_trashcan_verb` [String] verb used to empty the worn trashcan (optional)
 #   - `max_scrolls_per_spell` [Integer] global cap on copies of any one spell (optional)
 #   - `max_scrolls_per_slot` [Integer] cap on copies in a single section (optional, game max 125)
 #   - `log_statistics` [Boolean] write a per-run stats log under LOG_DIR; default false
+#
+# @note `worn_trashcan` and `worn_trashcan_verb` are SHARED base-yaml settings
+#   used by many scripts, so they are read from the TOP LEVEL of your profile,
+#   never from a stack-scrolls bucket. Leave them where your other scripts read
+#   them; do not move them under `stack_scrolls:`.
 #
 # @note Filter logic. Matching is EXACT on a spell's full name OR abbreviation,
 #   case-insensitive -- e.g. 'Fire' matches only the spell named/abbreviated
@@ -83,7 +104,7 @@
 #   ;stack-scrolls prune
 #   ;stack-scrolls prune confirm
 class ScrollStack
-  VERSION = '3.1.0'
+  VERSION = '3.1.1'
 
   # --- Game-text patterns ---------------------------------------------------
   SECTION_HAS_PATTERN = /The (?<spell>.*) section has (?<count>\d+)/.freeze
@@ -126,7 +147,7 @@ class ScrollStack
   def load_and_migrate_settings(settings)
     @using_legacy_settings = false
 
-    return normalize_new_config(settings.stack_scrolls) if settings.stack_scrolls.is_a?(Hash)
+    return normalize_new_config(settings.stack_scrolls, settings) if settings.stack_scrolls.is_a?(Hash)
 
     if settings.scroll_stackers
       @using_legacy_settings = true
@@ -137,22 +158,26 @@ class ScrollStack
   end
 
   # Transforms a new-format `stack_scrolls:` hash into the internal config shape.
-  # Pure: no I/O, accepts either string or symbol keys.
+  # Pure: no I/O, accepts either string or symbol keys. The worn-trashcan keys
+  # are read from the SHARED top-level +settings+ (not the nested block) because
+  # many scripts share one trash receptacle.
   #
   # @param stack_config [Hash] the nested settings hash
+  # @param settings [Object, nil] the top-level settings object (responds to
+  #   worn_trashcan / worn_trashcan_verb); nil leaves the trashcan unset
   # @return [Hash] normalized config
   # @example
   #   normalize_new_config('stackers' => ['scroll.folio'], 'max_scrolls_per_spell' => 100)
   #   # => { scroll_stackers: ['scroll.folio'], ..., max_scrolls_per_spell: 100, ... }
-  def normalize_new_config(stack_config)
+  def normalize_new_config(stack_config, settings = nil)
     {
       scroll_stackers: pick(stack_config, 'stackers'),
       stacker_container: pick(stack_config, 'stacker_container'),
       keep_scrolls: pick(stack_config, 'keep_scrolls') || [],
       discard_scrolls: pick(stack_config, 'discard_scrolls') || [],
       trash_excess_scrolls: resolve_bool_setting(stack_config, 'trash_excess_scrolls', false),
-      worn_trashcan: pick(stack_config, 'worn_trashcan'),
-      worn_trashcan_verb: pick(stack_config, 'worn_trashcan_verb'),
+      worn_trashcan: settings&.worn_trashcan,
+      worn_trashcan_verb: settings&.worn_trashcan_verb,
       max_scrolls_per_spell: pick(stack_config, 'max_scrolls_per_spell'),
       max_scrolls_per_slot: pick(stack_config, 'max_scrolls_per_slot'),
       log_statistics: resolve_bool_setting(stack_config, 'log_statistics', false)
@@ -253,8 +278,10 @@ class ScrollStack
     end
 
     respond("  trash_excess_scrolls: #{config[:trash_excess_scrolls]}")
-    respond("  worn_trashcan: #{config[:worn_trashcan] || 'trash bucket'}")
-    respond("  worn_trashcan_verb: #{config[:worn_trashcan_verb] || 'tap'}")
+    respond('')
+    respond('  # NOTE: worn_trashcan / worn_trashcan_verb are SHARED settings used by')
+    respond('  # other scripts. Leave them at the TOP LEVEL of your YAML; do NOT move')
+    respond('  # them under stack_scrolls.')
     respond('')
     respond('  # Limit settings')
     respond('  max_scrolls_per_spell: 100  # Global max copies for any spell')
@@ -264,9 +291,10 @@ class ScrollStack
     msg('REMOVE THESE OLD KEYS FROM YOUR YAML:')
     msg('-' * 70)
     %w[scroll_stackers stacker_container keep_scrolls discard_scrolls
-       trash_excess_scrolls worn_trashcan worn_trashcan_verb].each do |key|
+       trash_excess_scrolls].each do |key|
       respond("  - #{key}")
     end
+    respond('  # (keep worn_trashcan / worn_trashcan_verb at the top level)')
 
     msg('-' * 70)
     msg('NOTE: Script will continue to work with old format, but new')
@@ -1848,6 +1876,13 @@ class ScrollStack
   # target cache. The target stacker is the only stacker in hand during this
   # phase; a scroll is fetched from the pack immediately before each push.
   #
+  # Deliberately does NOT `turn` to the spell's section first: a push auto-files
+  # the scroll into the matching section (creating it when absent), exactly like
+  # the container-stacking path. Turning to a not-yet-existing section instead
+  # draws "That spell does not appear to be available", which is not a
+  # turn-failure pattern, so every new-section push would block for the full bput
+  # timeout.
+  #
   # @param target_stacker [Hash] the target stacker cache entry
   # @param spell_name [String] the spell being pushed
   # @param count [Integer] how many to push
@@ -1859,8 +1894,6 @@ class ScrollStack
 
     with_stacker(target_stacker['name']) do
       open_stacker(target_stacker['name'])
-      turn_to_spell(target_stacker['name'], spell_name)
-      waitrt?
 
       count.times do
         break unless get_pulled_scroll
@@ -2442,9 +2475,105 @@ class ScrollStack
     respond('=' * 80)
   end
 
+  # Reorders consolidation moves into a capacity-safe execution sequence.
+  #
+  # The planner ({#compute_consolidation_plan}) describes the FINAL distribution,
+  # but the moves cannot be executed in an arbitrary order. A stacker that is
+  # full at the start (because the sections leaving it are scheduled later) will
+  # reject an inbound push with "no more room", stalling the run. This greedily
+  # emits, at each step, only a move whose target currently has room -- either it
+  # already holds the spell's section (a merge needs no new slot) or it has a
+  # free slot -- while a simulated occupancy model frees each source slot so that
+  # later moves unblock. Pure and nil-safe; never mutates its inputs.
+  #
+  # @param moves [Array<Hash>, nil] moves from a consolidation plan
+  # @param stackers [Array, nil] the stacker cache, for initial occupancy
+  # @return [Hash] { ordered: Array<Hash>, safe: Boolean } -- +ordered+ is always
+  #   a permutation of +moves+ (nothing is dropped). +safe+ is false only when a
+  #   dependency cycle with no free slot anywhere prevented a fully capacity-safe
+  #   ordering; the unplaceable remainder is appended in its original order.
+  def order_consolidation_moves(moves, stackers)
+    moves = Array(moves)
+    return { ordered: [], safe: true } if moves.empty?
+
+    occupancy = {}          # stacker name -> occupied slot count
+    capacity  = {}          # stacker name -> total slots (nil = unbounded)
+    sections  = {}          # [stacker name, spell] -> true when a section exists
+
+    Array(stackers).each do |stacker|
+      name = stacker['name']
+      contents = stacker['contents'] || []
+      capacity[name] = contents.size
+      occupancy[name] = contents.count { |data| !slot_empty?(data) }
+      contents.each do |data|
+        sections[[name, data[0]]] = true unless slot_empty?(data)
+      end
+    end
+
+    pending = moves.dup
+    ordered = []
+
+    loop do
+      progressed = false
+      pending.reject! do |move|
+        next false unless move_target_has_room?(move, occupancy, capacity, sections)
+
+        apply_move_to_model(move, occupancy, sections)
+        ordered << move
+        progressed = true
+        true
+      end
+      break if pending.empty? || !progressed
+    end
+
+    ordered.concat(pending) # cycle remainder (rare); appended so nothing is lost
+    { ordered: ordered, safe: pending.empty? }
+  end
+
+  # Whether a move's target can accept a push right now under the simulated
+  # model: an existing section merges without a new slot; otherwise a free slot
+  # is required (an unknown/unbounded capacity always has room). Pure.
+  #
+  # @param move [Hash] a consolidation move
+  # @param occupancy [Hash{String=>Integer}] simulated occupied-slot counts
+  # @param capacity [Hash{String=>Integer}] slot capacity per stacker
+  # @param sections [Hash{Array=>Boolean}] existing [stacker, spell] sections
+  # @return [Boolean]
+  def move_target_has_room?(move, occupancy, capacity, sections)
+    target = move[:target_stacker_name]
+    return true if sections[[target, move[:spell]]]
+
+    cap = capacity[target]
+    cap.nil? || occupancy.fetch(target, 0) < cap
+  end
+
+  # Advances the simulated model for one executed move: the source slot is freed
+  # and, when the target did not already hold the spell, a new section consumes a
+  # target slot. Pure mutation of the passed-in model hashes. (Mirrors the real
+  # I/O so {#order_consolidation_moves} stays capacity-accurate.)
+  #
+  # @param move [Hash] a consolidation move
+  # @param occupancy [Hash{String=>Integer}] simulated occupied-slot counts
+  # @param sections [Hash{Array=>Boolean}] existing [stacker, spell] sections
+  # @return [void]
+  def apply_move_to_model(move, occupancy, sections)
+    source = move[:source_stacker_name]
+    target = move[:target_stacker_name]
+
+    occupancy[source] -= 1 if occupancy[source] && occupancy[source] > 0
+
+    key = [target, move[:spell]]
+    return if sections[key]
+
+    occupancy[target] = occupancy.fetch(target, 0) + 1
+    sections[key] = true
+  end
+
   # Executes a consolidation plan, moving each scroll to its target stacker.
-  # Two-phase per move (pull source -> pack, then push pack -> target) so both
-  # stackers are never needed in hand simultaneously.
+  # Moves are run in a capacity-safe order ({#order_consolidation_moves}) so an
+  # inbound push never lands on a stacker that has not yet been freed. Two-phase
+  # per move (pull source -> pack, then push pack -> target) so both stackers are
+  # never needed in hand simultaneously.
   #
   # @param plan [Hash] a plan from {#build_consolidation_plan}
   # @return [void]
@@ -2454,7 +2583,14 @@ class ScrollStack
     scrolls_moved = 0
     slots_freed = 0
 
-    plan[:moves].each do |move|
+    schedule = order_consolidation_moves(plan[:moves], UserVars.stackers)
+    unless schedule[:safe]
+      msg('WARNING: Some moves could not be ordered safely (stackers are tightly')
+      msg('         packed). They will be attempted last; re-run consolidate if any')
+      msg('         scrolls are left stowed.')
+    end
+
+    schedule[:ordered].each do |move|
       msg("Moving #{move[:count]} #{move[:spell]}: #{move[:source_stacker_name]} -> #{move[:target_stacker_name]}...")
 
       pulled = pull_slot_into_pack(move[:source_stacker_obj], move[:source_slot], move[:spell], move[:count])
