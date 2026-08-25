@@ -6566,7 +6566,7 @@ crafting_recipes:
   - mechanism
   - mechanism
   - lenses
-  - name: a simple orlog
+- name: a simple orlog
   noun: orlog
   work_order: true
   type: tinkering
