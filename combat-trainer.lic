@@ -1663,6 +1663,7 @@ class SpellProcess
     Flags.add('ct-regalia-expired', 'Your .* glimmers? weakly') if DRStats.trader?
     Flags.add('ct-regalia-succeeded', 'You cup your palms skyward to bask in') if DRStats.trader?
     Flags.add('ct-shock-warning', 'You are distinctly aware that completion of this spell pattern may bring you shock')
+    Flags.add('ct-spell-unknown', 'You have no idea how to cast that spell')
 
     @offensive_spells
       .select { |spell| spell['expire'] }
@@ -1876,12 +1877,46 @@ class SpellProcess
   def check_timer(game_state)
     return if game_state.cast_timer.nil? || (Time.now - game_state.cast_timer) <= 70
 
-    game_state.cast_timer = nil
     if game_state.casting
       DRC.bput('release spell', 'You let your concentration lapse', "You aren't preparing a spell")
       DRC.bput('release mana', 'You release all', "You aren't harnessing any mana")
     end
+    reset_casting_state(game_state)
+  end
+
+  # Clear the casting flags/ivars WITHOUT the success-path side-effects (weapon
+  # restore, moon-weapon re-wear, blacklist, command send) that cast_spell runs.
+  # Used by the two non-casting exits -- an aborted prep and the 70s check_timer
+  # recovery -- so stale casting_* sub-flags don't bleed into the next cast.
+  def reset_casting_state(game_state)
     game_state.casting = false
+    game_state.cast_timer = nil
+    game_state.hide_on_cast = false
+    game_state.casting_weapon_buff = false
+    game_state.casting_consume = false
+    game_state.casting_nr = false
+    game_state.casting_cfb = false
+    game_state.casting_cfw = false
+    game_state.casting_cyclic = false
+    game_state.casting_sorcery = false
+    game_state.casting_moonblade = false
+    game_state.casting_regalia = false
+    @custom_cast = nil
+    @symbiosis = nil
+    @barrage = nil
+    @before = nil
+    @after = nil
+    @skill = nil
+    @abbrev = nil
+    @use_auto_mana = nil
+    @prepared_spell = nil
+    # Clear the cambrinth invoke/harness intent for this (now-abandoned) cast.
+    # The cambrinth itself stays charged on the game side -- charges never leak --
+    # so a later cast can still use them; we just must not carry a stale invoke
+    # decision into the next spell, or check_current would wait on check_charging?
+    # for a spell that isn't using cambrinth.
+    @should_invoke = nil
+    @should_harness = false
   end
 
   def check_avtalia(game_state)
@@ -2117,6 +2152,7 @@ class SpellProcess
     needs_training = ['Warding', 'Utility', 'Augmentation', 'Sorcery', 'Debilitation', 'Targeted Magic'].select do |skill|
       data = @training_spells[skill]
       next false unless data
+      next false if spell_disabled?(data['abbrev'])
       next false unless game_state.is_offense_allowed? || data['harmless']
       next false unless %w[Warding Utility Augmentation].include?(skill) || (!@training_spells_combat_sorcery && skill == 'Sorcery') || !game_state.npcs.empty?
       next false unless DRSkill.getxp(skill) < @magic_exp_training_max_threshold
@@ -2177,11 +2213,33 @@ class SpellProcess
     DRCI.put_away_item?(data['runestone_name'], @runestone_storage)
   end
 
+  # Spells the game reports the character cannot cast ("You have no idea how to
+  # cast that spell") are disabled by abbrev so they are not retried every tick.
+  # Keyed by abbrev, not by a flag on the spell hash, because some callers
+  # (empath healing) rebuild the hash each tick, so a flag on it would not
+  # persist. See issue #7563.
+  def spell_disabled?(abbrev)
+    !!(abbrev && @disabled_spells&.include?(abbrev.downcase))
+  end
+
+  def disable_spell(data)
+    abbrev = data['abbrev']
+    return unless abbrev
+
+    @disabled_spells ||= Set.new
+    # add? returns nil when already present, so the message prints exactly once
+    # per run; the disable is cleared the next time combat-trainer is started.
+    return unless @disabled_spells.add?(abbrev.downcase)
+
+    DRC.message("Disabling #{data['name'] || abbrev} for this session: the game reports you have no idea how to cast it. Re-memorize it (or fix your spell lists) and restart combat-trainer to re-enable.")
+  end
+
   def check_buffs(game_state)
     return if game_state.casting
     return if DRStats.mana < @buff_spell_mana_threshold
 
     recastable_buffs = @buff_spells.select do |name, data|
+      next false if spell_disabled?(data['abbrev'])
       next false unless data['recast'] || data['recast_every'] || data['expire']
       next false if data['expire'] && !Flags["ct-#{data['abbrev']}"]
       next false unless check_buff_conditions?(name, game_state)
@@ -2262,9 +2320,9 @@ class SpellProcess
 
     echo('Healing') if $debug_mode_ct
     if @wounds.any?
-      if @empath_spells['FOC']
+      if @empath_spells['FOC'] && !spell_disabled?('foc')
         data = { 'abbrev' => 'foc', 'mana' => @empath_spells['FOC'].first, 'cambrinth' => @empath_spells['FOC'][1..-1], 'harmless' => true }
-      elsif @empath_spells['HEAL']
+      elsif @empath_spells['HEAL'] && !spell_disabled?('heal')
         data = { 'abbrev' => 'heal', 'mana' => @empath_spells['HEAL'].first, 'cambrinth' => @empath_spells['HEAL'][1..-1], 'harmless' => true }
       end
       @wounds = {}
@@ -2423,6 +2481,7 @@ class SpellProcess
 
     echo "Figuring out ready offensive spells..." if $debug_mode_ct
     ready_spells = @offensive_spells.select do |spell|
+      next false if spell_disabled?(spell['abbrev'])
       next false if spell['target_enemy'] && !game_state.npcs.include?(spell['target_enemy'])
       next false if spell['min_threshold'] && game_state.npcs.length < spell['min_threshold']
       next false if spell['max_threshold'] && game_state.npcs.length > spell['max_threshold']
@@ -2500,6 +2559,18 @@ class SpellProcess
 
   def prepare_spell(data, game_state, force_cambrinth = false)
     return unless data
+    # Central guard: a spell the game said we cannot cast is skipped here, so every
+    # caller (offensive/buff/training selects, empath/necro healing, regalia, ...)
+    # is covered and none re-send `prep` or trip destructive prep side-effects
+    # (release_cyclics, drop_moon_weapon?) below. See issue #7563.
+    # reset_casting_state clears any casting_* sub-flag a caller set before calling
+    # us -- check_cfb/check_cfw/heal_corpse/check_consume set casting_cfb/cfw/nr/
+    # consume before prepare_spell -- otherwise necro_casting? would stay true after
+    # a disabled necro spell and suppress looting, rituals, and pet creation.
+    if spell_disabled?(data['abbrev'])
+      reset_casting_state(game_state)
+      return
+    end
 
     data = DRCA.check_discern(data, @settings, spell_is_sorcery?(data)) if data['use_auto_mana']
     game_state.cast_timer = Time.now
@@ -2573,8 +2644,25 @@ class SpellProcess
     game_state.casting_regalia = data['abbrev'].casecmp('REGAL').zero?
 
     Flags.reset('ct-shock-warning')
+    Flags.reset('ct-spell-unknown')
     custom_prep = data['custom_prep'] || @settings['custom_spell_prep']
-    DRCA.prepare?(data['abbrev'], data['mana'], data['symbiosis'], command, data['tattoo_tm'], data['runestone_name'], data['runestone_tm'], custom_prep)
+    prepared = DRCA.prepare?(data['abbrev'], data['mana'], data['symbiosis'], command, data['tattoo_tm'], data['runestone_name'], data['runestone_tm'], custom_prep)
+
+    # The character does not know this spell (e.g. a scroll-memorized spell lost on
+    # death, or an Analogous Patterns spell forgotten at circle 10). Disable it so we
+    # do not retry it every tick; the check_* paths below skip disabled spells.
+    disable_spell(data) if Flags['ct-spell-unknown']
+    Flags.reset('ct-spell-unknown')
+
+    # Preparation failed (unknown spell, area interference, exhausted retries, etc.).
+    # Do NOT set casting; otherwise execute() bails on `if game_state.casting` and
+    # starves all offensive and training casting until check_timer clears it 70s later.
+    # reset_casting_state also clears the casting_* sub-flags set above (cyclic,
+    # moonblade, regalia) and by callers (sorcery, weapon_buff, hide_on_cast).
+    unless prepared
+      reset_casting_state(game_state)
+      return
+    end
 
     if Flags['ct-shock-warning'] && !game_state.is_permashocked?
       DRC.message('Dropping spell: Got shock warning.')
@@ -6663,6 +6751,7 @@ before_dying do
   Flags.delete('ct-germshieldlost')
   Flags.delete('ct-itemdropped')
   Flags.delete('ct-shock-warning')
+  Flags.delete('ct-spell-unknown')
   Flags.delete('ct-maneuver-cooldown-reduced')
   Flags.delete('ct-attack-out-of-range')
   Flags.delete('ct-battle-cry-not-facing')

@@ -3303,6 +3303,362 @@ RSpec.describe SpellProcess do
       instance.send(:cast_ritual, { 'ritual' => true }, gs)
     end
   end
+
+  # ===========================================================================
+  # Failed spell prep must not leave the character wedged (issue #7563).
+  #
+  # DRCA.prepare? returns false when preparation fails (unknown spell, area
+  # interference, exhausted retries, ...). The original bug discarded that value
+  # and set game_state.casting = true unconditionally, so #execute bailed on
+  # `if game_state.casting` and starved all offensive/training casting until
+  # check_timer cleared it 70s later. These specs also cover the follow-up work:
+  # disabling genuinely-unknown spells (by abbrev, centrally in prepare_spell so
+  # every caller is covered) and fully resetting casting state on the abort path.
+  # ===========================================================================
+  describe '#prepare_spell' do
+    def build_prep_state(**attrs)
+      gs = GameState.allocate
+      { casting: false, cast_timer: nil }.merge(attrs).each { |k, v| gs.send(:"#{k}=", v) }
+      gs
+    end
+
+    it 'sets casting when preparation succeeds' do
+      allow(DRCA).to receive(:prepare?).and_return('You feel fully prepared to cast your spell.')
+
+      instance = build_spell_process
+      gs = build_prep_state
+      data = { 'abbrev' => 'FIRE', 'name' => 'Fire Spirit', 'mana' => 3, 'cambrinth' => [] }
+
+      instance.send(:prepare_spell, data, gs)
+
+      expect(gs.casting).to be true
+    end
+
+    it 'leaves casting unset AND does not disable the spell on a transient failure' do
+      # prepare? returns false but the unknown-spell flag never trips (e.g. area
+      # interference). We must recover WITHOUT permanently disabling a castable
+      # spell -- disabling is reserved for the specific "no idea how to cast" line.
+      allow(DRCA).to receive(:prepare?).and_return(false)
+
+      instance = build_spell_process
+      gs = build_prep_state
+      data = { 'abbrev' => 'FIRE', 'name' => 'Fire Spirit', 'mana' => 3 }
+
+      instance.send(:prepare_spell, data, gs)
+
+      expect(gs.casting).to be false
+      expect(gs.cast_timer).to be_nil
+      expect(instance.send(:spell_disabled?, 'fire')).to be false
+    end
+
+    it 'disables an unknown spell, announces it once, and does not set casting' do
+      # Mimic the game replying "You have no idea how to cast that spell".
+      allow(DRCA).to receive(:prepare?) do
+        Flags['ct-spell-unknown'] = true
+        false
+      end
+      allow(DRC).to receive(:message)
+
+      instance = build_spell_process
+      gs = build_prep_state
+      data = { 'abbrev' => 'EASE', 'name' => 'Ease Burden', 'mana' => 3 }
+
+      instance.send(:prepare_spell, data, gs)
+
+      expect(instance.send(:spell_disabled?, 'ease')).to be true
+      expect(gs.casting).to be false
+      expect(DRC).to have_received(:message).once
+    end
+
+    it 'short-circuits a disabled spell before pinging the game or firing prep side-effects' do
+      # Central guard: a disabled spell must not re-send `prep` (DRCA.prepare?) or
+      # run destructive prep side-effects (release_cyclics) -- even a cyclic one.
+      instance = build_spell_process(disabled_spells: Set.new(['leth']))
+      gs = build_prep_state
+      data = { 'abbrev' => 'LETH', 'name' => 'Lethargy', 'mana' => 3, 'cyclic' => true }
+
+      expect(DRCA).not_to receive(:prepare?)
+      expect(DRCA).not_to receive(:release_cyclics)
+
+      instance.send(:prepare_spell, data, gs)
+
+      expect(gs.casting).to be false
+    end
+
+    it 'clears casting_* sub-flags on the abort path so they do not bleed into the next cast' do
+      # A cyclic prep sets casting_cyclic and releases cyclics BEFORE prepare?; a
+      # sorcery caller sets casting_sorcery. On failure all must be reset, or the
+      # next (non-cyclic/non-sorcery) cast mis-fires avtalia_cyclic / stows a weapon.
+      allow(DRCA).to receive(:prepare?).and_return(false)
+      allow(DRCA).to receive(:release_cyclics)
+
+      instance = build_spell_process
+      instance.instance_variable_set(:@should_invoke, [5]) # stale cambrinth intent from a prior cast
+      gs = build_prep_state(casting_sorcery: true)
+      data = { 'abbrev' => 'FIRE', 'name' => 'Fire Spirit', 'mana' => 3, 'cyclic' => true }
+
+      instance.send(:prepare_spell, data, gs)
+
+      expect(DRCA).to have_received(:release_cyclics) # side-effect ran (spell not disabled)
+      expect(gs.casting_cyclic).to be false           # ...but the flag it set was reset
+      expect(gs.casting_sorcery).to be false
+      expect(gs.casting).to be false
+      expect(instance.instance_variable_get(:@should_invoke)).to be_nil # no stale cambrinth intent
+    end
+  end
+
+  # ===========================================================================
+  # #spell_disabled? / #disable_spell -- boundary and edge behavior
+  # ===========================================================================
+  describe '#disable_spell / #spell_disabled?' do
+    it 'is a no-op with no crash when the spell has no abbrev' do
+      instance = build_spell_process
+      allow(DRC).to receive(:message)
+
+      instance.send(:disable_spell, { 'name' => 'Nameless' })
+
+      expect(DRC).not_to have_received(:message)
+      expect(instance.send(:spell_disabled?, nil)).to be false
+    end
+
+    it 'returns false for a fresh instance that never disabled anything' do
+      instance = build_spell_process
+      expect(instance.send(:spell_disabled?, 'foc')).to be false
+    end
+
+    it 'matches case-insensitively and announces exactly once per abbrev' do
+      allow(DRC).to receive(:message)
+      instance = build_spell_process
+
+      instance.send(:disable_spell, { 'abbrev' => 'FOC', 'name' => 'Focus' })
+      instance.send(:disable_spell, { 'abbrev' => 'foc', 'name' => 'Focus' })
+
+      expect(DRC).to have_received(:message).once
+      expect(instance.send(:spell_disabled?, 'foc')).to be true
+      expect(instance.send(:spell_disabled?, 'FOC')).to be true
+    end
+  end
+
+  # ===========================================================================
+  # #check_timer -- the 70s recovery shares reset_casting_state, boundary-tested
+  # ===========================================================================
+  describe '#check_timer' do
+    it 'releases and fully resets casting state once the 70s window is exceeded' do
+      allow(DRC).to receive(:bput)
+      instance = build_spell_process
+      instance.instance_variable_set(:@should_invoke, [5]) # a cambrinth cast that timed out mid-flight
+      gs = GameState.allocate
+      gs.casting = true
+      gs.casting_sorcery = true
+      gs.cast_timer = Time.now - 71
+
+      instance.send(:check_timer, gs)
+
+      expect(DRC).to have_received(:bput).with('release spell', anything, anything)
+      expect(gs.casting).to be false
+      expect(gs.casting_sorcery).to be false
+      expect(gs.cast_timer).to be_nil
+      # cambrinth stays charged game-side, but the stale invoke intent must not
+      # bleed into the next cast (would wrongly gate check_current on charging).
+      expect(instance.instance_variable_get(:@should_invoke)).to be_nil
+    end
+
+    it 'does nothing while still inside the 70s window (boundary)' do
+      instance = build_spell_process
+      gs = GameState.allocate
+      gs.casting = true
+      gs.casting_sorcery = true
+      gs.cast_timer = Time.now - 10 # well inside the 70s window: must NOT fire
+
+      expect(DRC).not_to receive(:bput)
+      instance.send(:check_timer, gs)
+
+      expect(gs.casting).to be true
+      expect(gs.casting_sorcery).to be true
+    end
+  end
+
+  # ===========================================================================
+  # #check_buffs -- the disabled filter is load-bearing: without it a disabled
+  # always-due buff is re-selected by `find` every tick and monopolizes the one
+  # per-tick buff slot, starving every other due buff.
+  # ===========================================================================
+  describe '#check_buffs' do
+    it 'skips a disabled always-due buff and casts the next due buff instead' do
+      DRStats.mana = 100
+      DRSpells._set_active_spells({}) # nothing active -> every buff is "due"
+      # NB: don't touch the shared $weapon_buffs global (reset_data doesn't restore
+      # it). BadBuff/GoodBuff aren't weapon buffs, so check_buff_conditions? already
+      # returns true against the real $weapon_buffs list.
+
+      # Disabled buff listed FIRST: with the filter gone, `find` would pick it every tick.
+      buffs = {
+        'BadBuff'  => { 'abbrev' => 'bad',  'name' => 'BadBuff',  'recast' => 5 },
+        'GoodBuff' => { 'abbrev' => 'good', 'name' => 'GoodBuff', 'recast' => 5 }
+      }
+      instance = build_spell_process(
+        buff_spells: buffs,
+        buff_spell_mana_threshold: 0,
+        buff_force_cambrinth: nil,
+        disabled_spells: Set.new(['bad'])
+      )
+      gs = double('GameState', casting: false)
+      allow(gs).to receive(:casting_weapon_buff=)
+
+      # Must prepare the healthy buff, never the disabled one.
+      expect(instance).to receive(:prepare_spell).with(hash_including('abbrev' => 'good'), anything, anything)
+      instance.send(:check_buffs, gs)
+    end
+  end
+
+  # ===========================================================================
+  # #check_training -- same filter, same starvation risk on the training slot.
+  # ===========================================================================
+  describe '#check_training' do
+    it 'does not train a disabled spell (the skill is filtered out)' do
+      DRStats.mana = 100
+      ward = { 'abbrev' => 'ward', 'name' => 'Warding Spell', 'harmless' => true }
+
+      instance = build_spell_process(
+        training_spells: { 'Warding' => ward },
+        training_spells_max_threshold: nil,
+        release_cyclic_on_low_mana: nil,
+        training_spell_mana_threshold: 0,
+        magic_exp_training_max_threshold: 100,
+        training_spells_wait: 45,
+        training_cyclic_timer: Time.now,
+        disabled_spells: Set.new(['ward'])
+      )
+      gs = double('GameState', casting: false, is_offense_allowed?: false)
+      # Returns its input so, if the filter let 'Warding' through, it would be
+      # selected and prepare_spell would run -- the filter is what prevents it.
+      allow(gs).to receive(:sort_by_rate_then_rank) { |arr| arr }
+
+      expect(instance).not_to receive(:prepare_spell)
+      instance.send(:check_training, gs)
+    end
+  end
+
+  # ===========================================================================
+  # #check_offensive -- the select filter skips a disabled spell (slot efficiency)
+  # ===========================================================================
+  describe '#check_offensive' do
+    it 'filters out a disabled offensive spell rather than choosing it for the tick' do
+      DRStats.mana = 100
+      disabled_spell = { 'abbrev' => 'LETH', 'name' => 'Lethargy', 'skill' => 'Debilitation' }
+
+      instance = build_spell_process(
+        offensive_spells: [disabled_spell],
+        offensive_spell_cycle: [],
+        offensive_spell_mana_threshold: 0,
+        disabled_spells: Set.new(['leth'])
+      )
+      # sort_by_rate_then_rank returns the spell's skill so that, if the filter
+      # let the disabled spell through, `data` would resolve to it and
+      # prepare_spell would be called -- i.e. the filter, not `return unless data`,
+      # is what keeps prepare_spell from running.
+      gs = double('GameState', casting: false, npcs: ['an orc'],
+                               is_offense_allowed?: true, dancing?: false,
+                               sort_by_rate_then_rank: ['Debilitation'])
+
+      expect(instance).not_to receive(:prepare_spell)
+      instance.send(:check_offensive, gs)
+    end
+  end
+
+  # ===========================================================================
+  # #check_health_empath -- disable covers the rebuilt healing hashes, and the
+  # FOC->HEAL fallback still heals when only the primary spell is disabled.
+  # ===========================================================================
+  describe '#check_health_empath' do
+    it 'does not ping the game for a disabled Vitality Healing during regeneration' do
+      DRStats.health = 50
+      DRSpells._set_active_spells({ 'Regeneration' => 100 })
+      allow(DRCA).to receive(:prepare?)
+
+      instance = build_spell_process(
+        empath_spells: { 'VH' => [5] },
+        empath_vitality_threshold: 75,
+        wounds: {},
+        disabled_spells: Set.new(['vh'])
+      )
+      gs = GameState.allocate
+
+      instance.send(:check_health_empath, gs)
+
+      expect(DRCA).not_to have_received(:prepare?)
+    end
+
+    it 'falls back to HEAL when FOC is disabled' do
+      DRStats.health = 100
+      DRSpells._set_active_spells({})
+      allow(DRCA).to receive(:prepare?).and_return('prepared')
+      allow(DRCA).to receive(:check_to_harness)
+
+      instance = build_spell_process(
+        empath_spells: { 'FOC' => [5], 'HEAL' => [5] },
+        empath_vitality_threshold: 75,
+        perc_health_timer: Time.now, # skip the perceive-health refresh branch
+        wounds: { 'head' => 5 },
+        disabled_spells: Set.new(['foc'])
+      )
+      gs = GameState.allocate
+      gs.casting = false
+
+      instance.send(:check_health_empath, gs)
+
+      expect(DRCA).to have_received(:prepare?).with('heal', any_args)
+    end
+  end
+
+  # ===========================================================================
+  # Necromancer callers -- UNGUARDED (no select filter): the central guard is what
+  # protects them, and it must also clear the casting_* sub-flag they set BEFORE
+  # calling prepare_spell, or necro_casting? sticks true and suppresses
+  # looting/rituals/pet creation for the rest of the session.
+  # ===========================================================================
+  describe '#check_consume' do
+    it 'does not ping the game for a disabled necromancer Siphon Vitality' do
+      DRStats.guild = 'Necromancer'
+      DRStats.health = 1
+      allow(DRCA).to receive(:prepare?)
+
+      instance = build_spell_process(
+        necromancer_healing: { 'Siphon Vitality' => { 'abbrev' => 'sv', 'name' => 'Siphon Vitality', 'mana' => 5 } },
+        siphon_vit_threshold: '100',
+        disabled_spells: Set.new(['sv'])
+      )
+      gs = GameState.allocate
+      gs.casting = false
+      allow(gs).to receive(:npcs).and_return(['an orc'])
+
+      instance.send(:check_consume, gs)
+
+      expect(DRCA).not_to have_received(:prepare?)
+    end
+  end
+
+  describe '#check_cfb' do
+    it 'does not leave casting_cfb set (necro_casting? stays false) when Call from Beyond is disabled' do
+      DRStats.guild = 'Necromancer'
+      allow(DRCA).to receive(:prepare?)
+
+      instance = build_spell_process(
+        necromancer_zombie: { 'Call from Beyond' => { 'abbrev' => 'cfb', 'name' => 'Call from Beyond', 'mana' => 5 } },
+        disabled_spells: Set.new(['cfb'])
+      )
+      gs = GameState.allocate
+      gs.casting = false
+      gs.casting_cfb = false
+      gs.prepare_cfb = true # a trigger fired, so check_cfb will try to cast it
+
+      instance.send(:check_cfb, gs)
+
+      expect(DRCA).not_to have_received(:prepare?) # central guard skipped it
+      expect(gs.casting_cfb).to be false           # ...and cleared the flag check_cfb set
+      expect(gs.necro_casting?).to be false         # so loot/rituals/pets are NOT suppressed
+    end
+  end
 end
 
 # ###################################################################
